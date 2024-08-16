@@ -1,0 +1,583 @@
+---
+title: "IPF Only - Epigenetic Age Difference and Lung Function Decline - ComBat Batch Corrected, Age Sample Used"
+author: "Gillian Goobie"
+date: "2024_08_15"
+output: 
+  bookdown::html_document2:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+  html_document: 
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=F}
+library(tidyverse)
+library(readxl)
+library(here)
+library(nnet)
+library(writexl) 
+library(knitr)
+library(lintr)
+library(psych)
+library(RColorBrewer)
+library(reticulate)
+library(survival)
+library(survminer)
+library(cmprsk)
+library(riskRegression)
+library(prodlim)
+library(lme4)
+library(performance)
+library(psycho)
+library(report)
+library(rms)
+library(splines)
+library(Greg)
+```
+
+# Load Processed Epigenetic Age Data
+```{r}
+outfile1 <- here::here("CombinedCohorts_DNAmEpigeneticAge_ComBatCorrected_2024_05_23.xlsx")
+dnam <- read_excel(outfile1)
+```
+
+
+# Upload Original CARE-PF and Simmons Cohort Baseline Data
+```{r}
+outfile2 <- here::here("CAREPF_fILDBaselineData_2022_02_12.xlsx")
+CARE <- read_excel(outfile2)
+```
+
+```{r}
+outfile3 <- here::here("Simmons_fILDBaselineData_2022_03_28.xlsx")
+Simm <- read_excel(outfile3)
+```
+
+
+# Isolate so only patients with IPF
+```{r}
+dnam <- dnam %>% filter(dx=="IPF")
+Simm <- Simm %>% filter(dx=="IPF")
+CARE <- CARE %>% filter(dx=="IPF")
+```
+
+
+
+## Calculate time between diagnosis and registry enrollment
+```{r}
+CARE <- CARE %>% rename("initial_visit_date"="consent_date")
+CARE <- CARE %>% mutate_at(vars(dob, dx_date, consent_date, formal_dx_date, reg_update, death_date, tx_date, pft_date, last_updated, deathORtx_date, DeathTxCensor_date, PM_date), as.Date, format="%m/%d/%Y")
+CARE <- CARE %>% mutate(diff_dx_enroll=as.numeric((consent_date - dx_date)/365.25))
+
+# Cut down to only ID and diff_dx_enroll
+CARE <- CARE %>% dplyr::select(ID, dob, dx_date, diff_dx_enroll)
+```
+
+```{r}
+Simm <- Simm %>% mutate_at(vars(dob, death_date, last_updated, tx_date, dx_date, UPMC_lastvisit, Simmons_lastvisit, consent_date, pft_date, deathORtx_date, DeathTxCensor_date, PM_date), as.Date, format="%m/%d/%Y")
+Simm <- Simm %>% mutate(diff_dx_enroll=as.numeric((consent_date - dx_date)/365.25))
+
+# Cut down to only ID and diff_dx_enroll
+Simm <- Simm %>% dplyr::select(ID, dob, dx_date, diff_dx_enroll)
+```
+
+```{r}
+dnam_Simm <- dnam %>% filter(cohort=="Simmons")
+dnam_CARE <- dnam %>% filter(cohort=="CARE")
+```
+
+```{r}
+dnam_CARE <- left_join(dnam_CARE, CARE, by="ID")
+```
+
+```{r}
+dnam_Simm <- left_join(dnam_Simm, Simm, by="ID")
+```
+
+```{r}
+dnam <- rbind(dnam_Simm, dnam_CARE)
+
+summary(dnam_Simm$diff_dx_enroll)
+summary(dnam_CARE$diff_dx_enroll)
+summary(dnam$diff_dx_enroll)
+```
+
+
+## Calculate time between dx_date and sample_date
+```{r}
+dnam <- dnam %>% mutate_at(vars(sample_date), as.Date, format="%m/%d/%Y")
+dnam <- dnam %>% mutate(diff_dx_sample=as.numeric((sample_date - dx_date)/365.25))
+```
+
+```{r}
+dnam_Simm <- dnam %>% filter(cohort=="Simmons")
+dnam_CARE <- dnam %>% filter(cohort=="CARE")
+
+summary(dnam_Simm$diff_dx_sample)
+summary(dnam_CARE$diff_dx_sample)
+summary(dnam$diff_dx_sample)
+```
+
+```{r}
+dnam <- dnam %>% mutate(age_sample=as.numeric((sample_date-dob)/365.25))
+dnam <- dnam %>% mutate(age_dx_sample_diff=(age_sample-age_dx))
+summary(dnam$age_dx_sample_diff)
+```
+
+
+
+
+# Creating an Epigenetic Age Difference (i.e. EAD or grim_agediff) variable
+```{r}
+dnam <- dnam %>% mutate(grim_agediff=mAge-age_sample)
+```
+
+# Make UPitt and UBC dataframes
+Correct cohort from "CARE" to "UBC"
+```{r}
+dnam <- dnam %>% mutate(cohort=ifelse(cohort=="CARE", "UBC", "UPitt"))
+```
+
+
+```{r}
+UPitt_dnam <- dnam %>% filter(cohort=="UPitt")
+UBC_dnam <- dnam %>% filter(cohort=="UBC")
+```
+
+
+# Fix Disadvantage Scores 
+Right now for the UPitt cohort patients, the score is the ADI value and for the UBC-PF patients it is the CIMD value, which cannot be analyzed together, so we need to fix that
+```{r}
+plot(ecdf(UPitt_dnam$disadv))
+UPitt_dnam$disadv <- ecdf(UPitt_dnam$disadv)(UPitt_dnam$disadv)
+```
+
+
+```{r}
+plot(ecdf(UBC_dnam$disadv))
+UBC_dnam$disadv <- ecdf(UBC_dnam$disadv)(UBC_dnam$disadv)
+```
+
+Bind UPitt_dnam to UBC_dnam to have combined dataframe with comparable disadv scores (scaled per 10%ile)
+```{r}
+dnam <- rbind(UPitt_dnam, UBC_dnam)
+dnam$disadv <- 10*(dnam$disadv)
+```
+
+# Extract only necessary columns
+```{r}
+colnames(dnam)
+dnam <- dnam %>% dplyr::select(ID, cohort, sex, race, dich_Race, age_sample, smokeHx, dx, dx_group, dx_IPF, fvc_pct, dlco_pct, status, time_DeathTxCensor, disadv, mAge, Age_Acceleration, grim_agediff, PM_5yrPreSamp, SO4_5yrPreSamp, NO3_5yrPreSamp, NH4_5yrPreSamp, BC_5yrPreSamp, OM_5yrPreSamp, SS_5yrPreSamp, Soil_5yrPreSamp)
+
+UPitt_dnam <- UPitt_dnam %>% dplyr::select(ID, cohort, sex, race, dich_Race, age_sample, smokeHx, dx, dx_group, dx_IPF, fvc_pct, dlco_pct, status, time_DeathTxCensor, disadv, mAge, Age_Acceleration, grim_agediff, PM_5yrPreSamp, SO4_5yrPreSamp, NO3_5yrPreSamp, NH4_5yrPreSamp, BC_5yrPreSamp, OM_5yrPreSamp, SS_5yrPreSamp, Soil_5yrPreSamp)
+
+UBC_dnam <- UBC_dnam %>% dplyr::select(ID, cohort, sex, race, dich_Race, age_sample, smokeHx, dx, dx_group, dx_IPF, fvc_pct, dlco_pct, status, time_DeathTxCensor, disadv, mAge, Age_Acceleration, grim_agediff, PM_5yrPreSamp, SO4_5yrPreSamp, NO3_5yrPreSamp, NH4_5yrPreSamp, BC_5yrPreSamp, OM_5yrPreSamp, SS_5yrPreSamp, Soil_5yrPreSamp)
+```
+
+
+
+# Uploading PFT Dataframes
+## UPitt
+```{r}
+#Need to import the correct sheet from the original UPitt file
+outfile1 <- here("Simmons_fILDPts_PFTs_2022_03_28.xlsx")
+UPitt_pft <- read_excel(outfile1, na="")
+```
+
+### Correct formatting for UPitt_pft dataframe
+```{r}
+UPitt_pft <- UPitt_pft %>% mutate_at(vars(pft_date, tx_date, dob, death_date, last_updated, dx_date, UPMC_lastvisit, Simmons_lastvisit, consent_date, first_pft_date), as.Date, format="%m/%d/%Y")
+str(UPitt_pft)
+```
+
+### Create PFT ID variable
+This will make it easier to identify any cells with issues and replace them if needed
+```{r}
+UPitt_pft <- UPitt_pft %>% mutate(pft_id=1:8639)
+```
+
+### Select Necessary PFT Columns
+```{r}
+UPitt_pft <- UPitt_pft %>% dplyr::select(ID, pft_date, fvc_pct, dlco_pct)
+str(UPitt_pft)
+```
+
+### Make cohort column
+```{r}
+UPitt_pft$cohort <- "UPitt"
+```
+
+
+## UBC
+```{r}
+#Need to import the correct sheet from the original UPitt file
+outfile1 <- here("CAREPF_AllPts_PFTs_2021_06_01.xlsx")
+UBC_pft <- read_excel(outfile1, na="")
+```
+
+### Correct formatting for pft dataframe
+```{r}
+UBC_pft <- UBC_pft %>% mutate_at(vars(pft_date, tx_date, dx_date), as.Date, format="%m/%d/%Y")
+```
+
+### dplyr::select Necessary PFT Columns
+```{r}
+UBC_pft <- UBC_pft %>% dplyr::select(ID, pft_date, fvc_pct, dlco_pct)
+str(UBC_pft)
+```
+
+### Make cohort column
+```{r}
+UBC_pft$cohort <- "UBC"
+```
+
+## Make columns equivalent between cohorts
+```{r}
+str(UPitt_pft)
+str(UBC_pft)
+```
+
+```{r}
+pft <- rbind(UPitt_pft, UBC_pft)
+```
+
+
+# Uploading PM Dataframe
+Need to upload the file that includes DeathTxCensor_date and tx_date
+```{r}
+outfile2 <- here("CombinedCohorts_5yrPreCensoringANDPreDxData_2023_04_03.xlsx")
+PM <- read_excel(outfile2, na="")
+```
+
+## Correct date format
+```{r}
+PM <- PM %>% mutate_at(vars(DeathTxCensor_date, tx_date, pft_date), as.Date, format="%m/%d/%Y")
+str(PM)
+```
+
+## Extract Necessary Variables and Combined with dnam
+```{r}
+PM <- PM %>% dplyr::select(ID, DeathTxCensor_date, tx_date, pft_date)
+PM$ID <- as.numeric(PM$ID)
+```
+
+```{r}
+dnam <- left_join(dnam, PM, by="ID")
+```
+
+
+## Releveling Factors
+Here I am releveling factors so that they are in an intuitive order for my later analyses.
+```{r}
+dnam$sex <- fct_relevel(dnam$sex, c("M","F"))
+dnam$race <- fct_relevel(dnam$race, c("W","B","A","N","U"))
+dnam$dich_Race <- fct_relevel(dnam$dich_Race, c("White","Non-White"))
+dnam$smokeHx <- fct_relevel(dnam$smokeHx, c("Never","Former","Always","Unknown"))
+dnam$cohort <- fct_relevel(dnam$cohort, c("UPitt", "UBC"))
+
+#For dx and dx_group, I just want IPF to be first and then the rest of the categories are alphabetical
+dnam$dx <- fct_relevel(dnam$dx, c("IPF"))
+dnam$dx_group <- fct_relevel(dnam$dx_group, c("IPF"))
+str(dnam)
+```
+
+
+# Remove PFTs that occurred after transplant
+Then will make a simpler dataframe that can be joined to pft
+```{r}
+dnam$txed <- ifelse(dnam$status==2, 1, 0)
+txed <- dnam %>% filter(txed==1) %>% dplyr::select(ID, tx_date)
+txed$ID <- as.numeric(txed$ID)
+str(txed)
+```
+
+Next will join txed to pft
+```{r}
+str(pft)
+pft$ID <- as.numeric(pft$ID)
+pft <- left_join(pft, txed, by="ID")
+
+#remove all pfts where pft_date>tx_date
+pft <- pft %>% filter(is.na(tx_date) | pft_date<tx_date)
+```
+
+# Remove PFT Values that Don't Make Sense
+There are some DLCO values that are too low that we need to remove. All the extremely high DLCOs have been removed that are incorrect and the remaining ones make sense.
+```{r}
+pft <- pft %>% filter(fvc_pct>=20 & fvc_pct<=150)
+summary(pft$fvc_pct)
+#FVCs look appropriate
+
+pft <- pft %>% filter(dlco_pct>=10 & dlco_pct<=150)
+summary(pft$dlco_pct)
+#DLCOs look appropriate
+```
+
+# Make PFT ID column
+```{r}
+pft$pft_id <- 1:30092
+```
+
+
+# Merge PFT Dataframe with dnam dataframe
+Keep a simple pft dataframe
+```{r}
+pftx <- pft
+```
+
+```{r}
+# Find overlapping unique IDs
+common_ids <- intersect(pft$ID, dnam$ID)
+
+# Count the number of overlapping unique IDs
+length(common_ids)
+```
+
+```{r}
+str(dnam)
+str(pft)
+```
+
+
+
+```{r}
+pft <- left_join(dnam, pft, by=c("ID"))
+pft <- pft %>% dplyr::select(-tx_date.y, -cohort.y)
+str(pft)
+pft <- pft %>% rename("pft_date.x"="first_pft_date", "fvc_pct.x"="first_fvc_pct", "dlco_pct.x"="first_dlco_pct", "pft_date.y"="pft_date", "fvc_pct.y"="fvc_pct", "dlco_pct.y"="dlco_pct", "tx_date.x"="tx_date", "cohort.x"="cohort")
+pft$ID <- as.factor(pft$ID)
+str(pft)
+```
+
+## Create Time from First PFT Variable
+```{r}
+pft <- pft %>% mutate(time_firstPFT=(pft_date-first_pft_date)/365.25)
+pft$time_firstPFT <- as.numeric(pft$time_firstPFT)
+pft <- pft %>% filter(time_firstPFT>=0)
+summary(pft$time_firstPFT)
+#Now there are no negative time_firstPFTs
+summary(pft$fvc_pct)
+summary(pft$dlco_pct)
+#And the breakdowns of fvc_pct and dlco_pct make sense
+```
+
+
+```{r}
+UPitt_pft <- pft %>% filter(cohort=="UPitt")
+UBC_pft <- pft %>% filter(cohort=="UBC")
+```
+
+
+
+## Descriptive Stats for FVC Decline
+```{r}
+#Look at the mean and total variance of fvc_pct
+pft %>% summarise(mean_fvc=mean(fvc_pct, na.rm=T))
+tot_var_fvc <- pft %>% dplyr::select(fvc_pct) %>% summarise(var_fvc_pct=var(fvc_pct, na.rm=T))
+tot_var_fvc
+
+#Look at the between subject variance
+bw_subj_var_fvc <- pft %>% group_by(ID) %>% mutate(mean_fvc_pct=mean(fvc_pct)) %>% ungroup() %>% summarise(bw_subj_var_fvc=var(mean_fvc_pct, na.rm=T))
+bw_subj_var_fvc
+
+fvc_ICC <- bw_subj_var_fvc/tot_var_fvc
+fvc_ICC
+```
+fvc_ICC=0.87 indicates that ~87% of the variance is between subject variance. I.e. there is more difference in fvc_pct between patients than within any single patient.
+
+## Number of PFTs
+```{r}
+n_pfts <- pft %>% count(ID)
+n_pfts
+summary(n_pfts$n)
+#This shows that the median # of PFTs is 6 and the mean is 7
+```
+Median number of PFTs 6 and mean is 7
+
+
+# Association between Epigenetic Age Difference and FVC Decline
+Linear mixed models with random intercept and slope will be used to evaluate the impact of EAD on FVC decline.
+## UPitt
+### Base Model
+```{r}
+FVC_lmer1 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*age_sample + (1 + time_firstPFT| ID), data=UPitt_pft)
+summary(FVC_lmer1)
+icc(FVC_lmer1)
+report(FVC_lmer1)
+```
+Higher EAD not associated with faster FVC decline in this model.
+
+### Complete Model
+```{r}
+FVC_lmer2 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + (1 + time_firstPFT| ID), data=UPitt_pft)
+summary(FVC_lmer2)
+icc(FVC_lmer2)
+report(FVC_lmer2)
+```
+Higher EAD not associated with faster FVC decline in this model.
+
+### Complete Model + Baseline FVC
+```{r}
+FVC_lmer3 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + time_firstPFT*first_fvc_pct + (1 + time_firstPFT| ID), data=UPitt_pft)
+summary(FVC_lmer3)
+icc(FVC_lmer3)
+report(FVC_lmer3)
+```
+Higher EAD not associated with faster FVC decline in this model.
+
+
+## UBC
+### Base Model
+```{r}
+FVC_lmer1 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*age_sample + (1 + time_firstPFT| ID), data=UBC_pft)
+summary(FVC_lmer1)
+icc(FVC_lmer1)
+report(FVC_lmer1)
+```
+**Higher EAD associated with faster FVC decline in this model such that each 1 year increase EAD is associated with an additional 0.23% predicted decrease in FVC/yr.**
+
+### Complete Model
+```{r}
+FVC_lmer2 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + (1 + time_firstPFT| ID), data=UBC_pft)
+summary(FVC_lmer2)
+icc(FVC_lmer2)
+report(FVC_lmer2)
+```
+**Higher EAD associated with faster FVC decline in this model such that each 1 year increase EAD is associated with an additional 0.25 % predicted decrease in FVC/yr.**
+
+### Complete Model + Baseline FVC
+```{r}
+FVC_lmer3 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + time_firstPFT*first_fvc_pct + (1 + time_firstPFT| ID), data=UBC_pft)
+summary(FVC_lmer3)
+icc(FVC_lmer3)
+report(FVC_lmer3)
+```
+**Higher EAD associated with faster FVC decline in this model such that each 1 year increase EAD is associated with an additional 0.27 % predicted decrease in FVC/yr.**
+
+
+## Combined Cohorts
+### Base Model
+```{r}
+FVC_lmer1 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*age_sample + cluster(cohort) + (1 + time_firstPFT| ID), data=pft)
+summary(FVC_lmer1)
+icc(FVC_lmer1)
+report(FVC_lmer1)
+```
+**Higher EAD associated with faster FVC decline in this model such that each 1 year increase EAD is associated with an additional 0.16 % predicted decreased in FVC/yr.**
+
+### Complete Model
+```{r}
+FVC_lmer2 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + cluster(cohort) + (1 + time_firstPFT| ID), data=pft)
+summary(FVC_lmer2)
+icc(FVC_lmer2)
+report(FVC_lmer2)
+```
+**Higher EAD is associated with faster FVC decline in this model such that each 1 year increase EAD is associated with an additional 0.13 % predicted decreased in FVC/yr.**
+
+### Complete Model + Baseline FVC
+```{r}
+FVC_lmer3 <- lmer(fvc_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + time_firstPFT*first_fvc_pct + cluster(cohort) + (1 + time_firstPFT| ID), data=pft)
+summary(FVC_lmer3)
+icc(FVC_lmer3)
+report(FVC_lmer3)
+```
+**Higher EAD is associated with faster FVC decline in this model such that each 1 year increase EAD is associated with an additional 0.15 % predicted decreased in FVC/yr.**
+
+
+# Association between Epigenetic Age Difference and DLCO Decline
+Linear mixed models with random intercept and slope will be used to evaluate the impact of EAD on DLCO decline.
+
+## UPitt
+### Base Model
+```{r}
+DLCO_lmer1 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*age_sample + (1 + time_firstPFT| ID), data=UPitt_pft)
+summary(DLCO_lmer1)
+icc(DLCO_lmer1)
+report(DLCO_lmer1)
+```
+Higher EAD not associated with faster DLCO decline in this model.
+
+### Complete Model
+```{r}
+DLCO_lmer2 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + (1 + time_firstPFT| ID), data=UPitt_pft)
+summary(DLCO_lmer2)
+icc(DLCO_lmer2)
+report(DLCO_lmer2)
+```
+Higher EAD not associated with faster DLCO decline in this model.
+
+### Complete Model + Baseline DLCO
+```{r}
+DLCO_lmer3 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + time_firstPFT*first_dlco_pct + (1 + time_firstPFT| ID), data=UPitt_pft)
+summary(DLCO_lmer3)
+icc(DLCO_lmer3)
+report(DLCO_lmer3)
+```
+Higher EAD not associated with faster DLCO decline in this model.
+
+
+## UBC
+### Base Model
+```{r}
+DLCO_lmer1 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*age_sample + (1 + time_firstPFT| ID), data=UBC_pft)
+summary(DLCO_lmer1)
+icc(DLCO_lmer1)
+report(DLCO_lmer1)
+```
+*Higher EAD marginally associated with faster DLCO decline in this model such that each 1 year increase EAD is associated with an additional 0.15 % predicted decrease in DLCO/yr.*
+
+### Complete Model
+```{r}
+DLCO_lmer2 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + (1 + time_firstPFT| ID), data=UBC_pft)
+summary(DLCO_lmer2)
+icc(DLCO_lmer2)
+report(DLCO_lmer2)
+```
+Higher EAD is not associated with faster DLCO decline in this model.
+
+### Complete Model + Baseline DLCO
+```{r}
+DLCO_lmer3 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + time_firstPFT*first_dlco_pct + (1 + time_firstPFT| ID), data=UBC_pft)
+summary(DLCO_lmer3)
+icc(DLCO_lmer3)
+report(DLCO_lmer3)
+```
+Higher EAD is not associated with faster DLCO decline in this model.
+
+
+## Combined Cohorts
+### Base Model
+```{r}
+DLCO_lmer1 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*age_sample + cluster(cohort) + (1 + time_firstPFT| ID), data=pft)
+summary(DLCO_lmer1)
+icc(DLCO_lmer1)
+report(DLCO_lmer1)
+```
+**Higher EAD is associated with faster DLCO decline in this model such that each 1 year increase EAD is associated with an additional 0.13 % predicted decreased in DLCO/yr.**
+
+
+### Complete Model
+```{r}
+DLCO_lmer2 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + cluster(cohort) + (1 + time_firstPFT| ID), data=pft)
+summary(DLCO_lmer2)
+icc(DLCO_lmer2)
+report(DLCO_lmer2)
+```
+No significant association between EAD and rate of decline in DLCO in this model.
+
+
+### Complete Model + Baseline DLCO
+```{r}
+DLCO_lmer3 <- lmer(dlco_pct ~ 1 + time_firstPFT*grim_agediff + time_firstPFT*disadv + time_firstPFT*dich_Race + time_firstPFT*sex + time_firstPFT*age_sample + time_firstPFT*smokeHx + time_firstPFT*first_dlco_pct + cluster(cohort) + (1 + time_firstPFT| ID), data=pft)
+summary(DLCO_lmer3)
+icc(DLCO_lmer3)
+report(DLCO_lmer3)
+```
+*Higher EAD is marginally associated with faster DLCO decline in this model such that each 1 year increase EAD is associated with an additional 0.11 % predicted decreased in DLCO/yr.*

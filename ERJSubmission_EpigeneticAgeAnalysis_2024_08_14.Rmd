@@ -1,0 +1,4031 @@
+---
+title: "GrimAge Epigenetic Age Analysis - ComBat Batch Corrected, Age Sample Used"
+author: "Gillian Goobie"
+date: "2024_06_19"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    code_folding: hide
+  bookdown::html_document2:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=F}
+library(tidyverse)
+library(readxl)
+library(parallel)
+library(here)
+library(knitr)
+library(RColorBrewer)
+library(Gviz)
+library(stringr)
+library(writexl)
+library(psych)
+library(survival)
+library('dnaMethyAge')
+library(qgcomp)
+library(splines)
+library(pspline)
+library(survival)
+library(survminer)
+library(forestplot)
+```
+
+# Load Processed Epigenetic Age Data
+```{r}
+outfile1 <- here::here("CombinedCohorts_DNAmEpigeneticAge_ComBatCorrected_2024_05_23.xlsx")
+dnam <- read_excel(outfile1)
+```
+
+# Create Death or Transplant Variable
+```{r}
+dnam <- dnam %>% mutate(deadORtx=ifelse(status==0, 0, 1))
+dnam$deadORtx <- as.factor(dnam$deadORtx)
+```
+
+# Upload Original CARE-PF and Simmons Cohort Baseline Data
+```{r}
+outfile2 <- here::here("CAREPF_fILDBaselineData_2022_02_12.xlsx")
+CARE <- read_excel(outfile2)
+```
+
+```{r}
+outfile3 <- here::here("Simmons_fILDBaselineData_2022_03_28.xlsx")
+Simm <- read_excel(outfile3)
+```
+
+
+## Calculate time between diagnosis and registry enrollment
+```{r}
+str(CARE)
+CARE <- CARE %>% rename("initial_visit_date"="consent_date")
+CARE <- CARE %>% mutate_at(vars(dob, dx_date, consent_date, formal_dx_date, reg_update, death_date, tx_date, pft_date, last_updated, deathORtx_date, DeathTxCensor_date, PM_date), as.Date, format="%m/%d/%Y")
+CARE <- CARE %>% mutate(diff_dx_enroll=as.numeric((consent_date - dx_date)/365.25))
+
+# Cut down to only ID and diff_dx_enroll
+CARE <- CARE %>% dplyr::select(ID, dob, dx_date, diff_dx_enroll)
+```
+
+```{r}
+str(Simm)
+Simm <- Simm %>% mutate_at(vars(dob, death_date, last_updated, tx_date, dx_date, UPMC_lastvisit, Simmons_lastvisit, consent_date, pft_date, deathORtx_date, DeathTxCensor_date, PM_date), as.Date, format="%m/%d/%Y")
+Simm <- Simm %>% mutate(diff_dx_enroll=as.numeric((consent_date - dx_date)/365.25))
+
+# Cut down to only ID and diff_dx_enroll
+Simm <- Simm %>% dplyr::select(ID, dob, dx_date, diff_dx_enroll)
+```
+
+```{r}
+dnam_Simm <- dnam %>% filter(cohort=="Simmons")
+dnam_CARE <- dnam %>% filter(cohort=="CARE")
+```
+
+```{r}
+dnam_CARE <- left_join(dnam_CARE, CARE, by="ID")
+```
+
+```{r}
+dnam_Simm <- left_join(dnam_Simm, Simm, by="ID")
+```
+
+```{r}
+dnam <- rbind(dnam_Simm, dnam_CARE)
+
+summary(dnam_Simm$diff_dx_enroll)
+summary(dnam_CARE$diff_dx_enroll)
+summary(dnam$diff_dx_enroll)
+```
+
+
+## Calculate time between dx_date and sample_date
+```{r}
+str(dnam)
+dnam <- dnam %>% mutate_at(vars(sample_date), as.Date, format="%m/%d/%Y")
+dnam <- dnam %>% mutate(diff_dx_sample=as.numeric((sample_date - dx_date)/365.25))
+```
+
+```{r}
+dnam_Simm <- dnam %>% filter(cohort=="Simmons")
+dnam_CARE <- dnam %>% filter(cohort=="CARE")
+
+summary(dnam_Simm$diff_dx_sample)
+summary(dnam_CARE$diff_dx_sample)
+summary(dnam$diff_dx_sample)
+```
+
+```{r}
+dnam <- dnam %>% mutate(age_sample=as.numeric((sample_date-dob)/365.25))
+dnam <- dnam %>% mutate(age_dx_sample_diff=(age_sample-age_dx))
+summary(dnam$age_dx_sample_diff)
+```
+
+
+
+# Epigenetic Age Calculation
+First I want to see the clock options
+```{r}
+availableClock()
+```
+HorvathS2013 is the most widely used one.
+Will also compare with PCGrimAge.
+
+
+## GrimAge
+***I already ran this epigenetic age calculation on the UPitt cluster with the raw DNAm data.***
+First need to make a dataframe for GrimAge called "age_info" which contains the Sample, Age, and Sex
+```{r}
+#age_info <- targetsx %>% dplyr::select(ID.x, age_sample, sex)
+#age_info <- age_info %>% mutate(Sex=ifelse(sex=="M", "Male", "Female"))
+#age_info <- age_info %>% rename(c("age_sample"="Age", "ID.x"="Sample"))
+#age_info <- age_info %>% dplyr::select(!sex)
+#age_info$Age <- round(age_info$Age, digits=0)
+#str(age_info)
+```
+
+
+```{r}
+#clock_name <- 'PCGrimAge'
+#Grim_age <- methyAge(bVals, clock=clock_name, age_info = age_info)
+```
+
+```{r}
+#str(Grim_age)
+#Grim_age$cohort <- cohort
+```
+All the above chunks are ##ed out because this analysis was performed on the Pitt HTC cluster where the raw DNAm data is held. The outputs from this were exported to run on my PC.
+
+# Creating an Epigenetic Age Difference (i.e. EAD or grim_agediff) variable
+```{r}
+dnam <- dnam %>% mutate(grim_agediff=mAge-age_sample)
+```
+
+
+# Creating Pollutant Stratification by IQR
+```{r}
+summary(dnam$PM_5yrPreSamp)
+IQR(dnam$PM_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(PM_5yrSamp_IQR = PM_5yrPreSamp/IQR(dnam$PM_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$SO4_5yrPreSamp)
+IQR(dnam$SO4_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(SO4_5yrSamp_IQR = SO4_5yrPreSamp/IQR(dnam$SO4_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$NO3_5yrPreSamp)
+IQR(dnam$NO3_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(NO3_5yrSamp_IQR = NO3_5yrPreSamp/IQR(dnam$NO3_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$NH4_5yrPreSamp)
+IQR(dnam$NH4_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(NH4_5yrSamp_IQR = NH4_5yrPreSamp/IQR(dnam$NH4_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$BC_5yrPreSamp)
+IQR(dnam$BC_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(BC_5yrSamp_IQR = BC_5yrPreSamp/IQR(dnam$BC_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$OM_5yrPreSamp)
+IQR(dnam$OM_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(OM_5yrSamp_IQR = OM_5yrPreSamp/IQR(dnam$OM_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$SS_5yrPreSamp)
+IQR(dnam$SS_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(SS_5yrSamp_IQR = SS_5yrPreSamp/IQR(dnam$SS_5yrPreSamp, na.rm=T))
+```
+
+```{r}
+summary(dnam$Soil_5yrPreSamp)
+IQR(dnam$Soil_5yrPreSamp, na.rm=T)
+dnam <- dnam %>% mutate(Soil_5yrSamp_IQR = Soil_5yrPreSamp/IQR(dnam$Soil_5yrPreSamp, na.rm=T))
+```
+
+
+
+# Make UPitt and UBC dataframes
+Correct cohort from "CARE" to "UBC"
+```{r}
+dnam <- dnam %>% mutate(cohort=ifelse(cohort=="CARE", "UBC", "UPitt"))
+```
+
+
+```{r}
+UPitt_dnam <- dnam %>% filter(cohort=="UPitt")
+UBC_dnam <- dnam %>% filter(cohort=="UBC")
+```
+
+
+# Fix Disadvantage Scores 
+Right now for the UPitt cohort patients, the score is the ADI value and for the UBC-PF patients it is the CIMD value, which cannot be analyzed together, so we need to fix that
+```{r}
+plot(ecdf(UPitt_dnam$disadv))
+UPitt_dnam$disadv <- ecdf(UPitt_dnam$disadv)(UPitt_dnam$disadv)
+```
+
+
+```{r}
+plot(ecdf(UBC_dnam$disadv))
+UBC_dnam$disadv <- ecdf(UBC_dnam$disadv)(UBC_dnam$disadv)
+```
+
+Bind UPitt_dnam to UBC_dnam to have combined dataframe with comparable disadv scores
+```{r}
+dnam <- rbind(UPitt_dnam, UBC_dnam)
+dnam$disadv <- 10*(dnam$disadv)
+```
+
+```{r}
+summary(dnam$disadv)
+IQR(dnam$disadv, na.rm=T)
+dnam <- dnam %>% mutate(disadv_IQR = disadv/IQR(dnam$disadv, na.rm=T))
+```
+
+
+```{r}
+UPitt_dnam <- dnam %>% filter(cohort=="UPitt")
+UBC_dnam <- dnam %>% filter(cohort=="UBC")
+```
+
+
+# Creating Binned EAD 
+## Dichotomized EAD
+```{r}
+quantile(dnam$grim_agediff, na.rm=T, probs=seq(0,1,1/4))
+#We can see that the quartile cut points are 0.4410807, 9.9443219, 12.8577961, 15.7156633, 31.1766437 
+dnam$grim_agediff_dich <- cut(dnam$grim_agediff,
+                      breaks=c(-1, 12.8577961, 100),
+                      labels=c("Low", "High"))
+summary(dnam$grim_agediff_dich)
+class(dnam$grim_agediff_dich)
+```
+
+## Quartiled EAD
+```{r}
+quantile(dnam$grim_agediff, na.rm=T, probs=seq(0,1,1/4))
+#We can see that the quartile cut points are 0.4410807, 9.9443219, 12.8577961, 15.7156633, 31.1766437  
+dnam$grim_agediff_quart <- cut(dnam$grim_agediff,
+                      breaks=c(-1, 9.9443219, 12.8577961, 15.7156633, 100),
+                      labels=c("1", "2", "3", "4"))
+summary(dnam$grim_agediff_quart)
+class(dnam$grim_agediff_quart)
+```
+# Uploading CanCOLD Data
+```{r}
+outfile2 <- here::here("CanCOLD_Data/CanCOLD_GrimAge_subset_2024_04_26.csv")
+CanCOLD <- read.csv(outfile2)
+```
+
+```{r}
+CanCOLD <- CanCOLD %>% rename("Subjectid"="ID", "SEX"="sex", "AGE"="age_sample", "DNAmGrimAge"="mAge")
+```
+
+```{r}
+CanCOLD <- CanCOLD %>% mutate(dz_group=ifelse(AsthmaEver==1 & COPDEver==1, "Asthma/COPD", 
+                                            ifelse(AsthmaEver==1 & COPDEver==0, "Asthma",
+                                                   ifelse(COPDEver==1 & AsthmaEver==0, "COPD", "Control"))))
+```
+
+Calculate EAD for CanCOLD
+```{r}
+CanCOLD$grim_agediff <- CanCOLD$mAge - CanCOLD$age_sample
+```
+
+```{r}
+CanCOLD <- CanCOLD %>% mutate(dx_group = case_when(
+    dz_group == "Control" ~ "Control",
+    dz_group == "Asthma" ~ "Airways Disease",
+    dz_group == "COPD" ~ "Airways Disease",
+    dz_group == "Asthma/COPD" ~ "Airways Disease",
+    TRUE ~ NA
+  ))
+```
+
+## Making sex-specific cohorts
+CanCOLD
+```{r}
+CanCOLD_m <- CanCOLD %>% filter(sex==1)
+CanCOLD_f <- CanCOLD %>% filter(sex==2)
+```
+
+fILD cohorts
+```{r}
+dnam_m <- dnam %>% filter(sex=="M")
+dnam_f <- dnam %>% filter(sex=="F")
+
+UBC_m <- UBC_dnam %>% filter(sex=="M")
+UBC_f <- UBC_dnam %>% filter(sex=="F")
+
+UPitt_m <- UPitt_dnam %>% filter(sex=="M")
+UPitt_f <- UPitt_dnam %>% filter(sex=="F")
+```
+
+
+
+## Summarizing Function
+```{r}
+n_prop_tbl <- function(x) {
+  tbl <- table(x)
+  res <- cbind(tbl, round(prop.table(tbl)*100,2))
+  colnames(res) <-  c('Count', 'Percentage')
+  res
+}
+```
+
+## CanCOLD Summary Data
+### EAD
+```{r}
+summary(CanCOLD$grim_agediff)
+summary(CanCOLD_f$grim_agediff)
+summary(CanCOLD_m$grim_agediff)
+```
+
+### Other Demographics
+```{r}
+summary(CanCOLD$age_sample)
+```
+
+```{r}
+n_prop_tbl(CanCOLD$sex)
+```
+
+```{r}
+n_prop_tbl(CanCOLD$dz_group)
+```
+
+## Calculating proportion of CanCOLD with Positive EAD
+```{r}
+CanCOLD_PosEAD <- CanCOLD %>% filter(grim_agediff>0)
+```
+
+```{r}
+n_prop_tbl(CanCOLD$dx_group)
+n_prop_tbl(CanCOLD_PosEAD$dx_group)
+n_prop_tbl(dnam$dx_group)
+```
+
+```{r}
+CanCOLD %>%
+  group_by(dx_group) %>%
+  summarize(
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+
+## Make combo df for Figure 1
+Add dnam to CanCOLD to combine for figure
+```{r}
+combo <- dnam %>% select(ID, age_sample, sex, mAge, cohort, dx_group)
+combo <- combo %>% mutate(dz_group=ifelse(cohort=="UPitt", "UPitt fILD", "UBC fILD"))
+CanCOLD <- CanCOLD %>% mutate(cohort="CanCOLD")
+CanCOLD <- CanCOLD %>%
+  mutate(sex = as.character(sex)) %>%  # Convert to character first
+  mutate(sex = case_when(
+    sex == "1" ~ "M",
+    sex == "2" ~ "F",
+    TRUE ~ sex  # Keeps any other values unchanged
+  )) %>%
+  mutate(sex = factor(sex, levels = c("M", "F")))
+CanCOLD <- CanCOLD %>% select(ID, age_sample, sex, mAge, cohort, dx_group, dz_group)
+combo <- rbind(combo, CanCOLD)
+```
+
+
+```{r}
+combo$dz_group <- as.factor(combo$dz_group)
+combo$dz_group <- fct_relevel(combo$dz_group, c("UPitt fILD", "UBC fILD", "Control", "Asthma", "COPD", "Asthma/COPD"))
+```
+
+```{r}
+combo <- combo %>%
+  mutate(dz_groupx = case_when(
+    dz_group == "UPitt fILD" ~ "fILD",
+    dz_group == "UBC fILD" ~ "fILD",
+    dz_group == "Control" ~ "Control",
+    dz_group == "Asthma" ~ "Airways Disease",
+    dz_group == "COPD" ~ "Airways Disease",
+    dz_group == "Asthma/COPD" ~ "Airways Disease",
+    TRUE ~ NA
+  ))
+```
+
+```{r}
+combo <- combo %>% mutate(grim_agediff = mAge - age_sample)
+```
+
+
+
+
+```{r}
+combo <- combo %>% mutate(dx_groupx = case_when(
+    dx_group == "Control" ~ "Control",
+    dx_group == "Airways Disease" ~ "Airways Disease",
+    dx_group == "IPF" ~ "IPF",
+    dx_group == "CTD-ILD" ~ "CTD-ILD",
+    dx_group == "HP" ~ "HP",
+    dx_group == "UNCLASSIFIABLE" ~ "Other ILD",
+    dx_group == "OTHER_IIP" ~ "Other ILD",
+    dx_group == "OTHER_ILD" ~ "Other ILD",
+    TRUE ~ NA
+  ))
+
+combo$dx_groupx <- fct_relevel(combo$dx_groupx, c("IPF", "CTD-ILD", "HP", "Other ILD", "Control", "Airways Disease"))
+```
+
+### Making Sex-specific dataframes
+```{r}
+combo_m <- combo %>% filter(sex=="M")
+combo_f <- combo %>% filter(sex=="F")
+```
+
+## Summary Data for Combined cohorts
+### Dz Group Data
+```{r}
+combo %>%
+  group_by(dz_groupx) %>%
+  summarize(
+    num_individuals = n(),
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+```{r}
+combo_m %>%
+  group_by(dz_groupx) %>%
+  summarize(
+    num_individuals = n(),
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+
+```{r}
+combo_f %>%
+  group_by(dz_groupx) %>%
+  summarize(
+    num_individuals = n(),
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+### Specific Dx Group Data
+```{r}
+combo %>%
+  group_by(dx_groupx) %>%
+  summarize(
+    num_individuals = n(),
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+```{r}
+combo_m %>%
+  group_by(dx_groupx) %>%
+  summarize(
+    num_individuals = n(),
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+
+```{r}
+combo_f %>%
+  group_by(dx_groupx) %>%
+  summarize(
+    num_individuals = n(),
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+## Evaluating EAD differences by Disease Group (fILD vs Airways Dz vs Control)
+```{r}
+kruskal.test(grim_agediff ~ dz_groupx, data = combo)
+```
+
+```{r}
+EAD_diff <- lm(grim_agediff ~ dz_groupx + sex + age_sample, data=combo)
+summary(EAD_diff)
+confint(EAD_diff)
+```
+
+
+### Sex-Specific
+```{r}
+kruskal.test(grim_agediff ~ dz_groupx, data = combo_m)
+```
+
+```{r}
+EAD_diff <- lm(grim_agediff ~ dz_groupx + age_sample, data=combo_m)
+summary(EAD_diff)
+confint(EAD_diff)
+```
+
+```{r}
+kruskal.test(grim_agediff ~ dz_groupx, data = combo_f)
+```
+
+```{r}
+EAD_diff <- lm(grim_agediff ~ dz_groupx + age_sample, data=combo_f)
+summary(EAD_diff)
+confint(EAD_diff)
+```
+
+# Plotting GrimAge
+Chronological vs Methylation Age
+```{r}
+colors <- c("skyblue", "steelblue3", "chartreuse4", "goldenrod2", "darkorange1", "coral3")
+
+(combo %>% ggplot(aes(x=age_sample, y=mAge, color=dz_group))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+ 
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+So we can see from this plot that our fILD patients almost invariably have a higher epigenetic age than their chronological age.
+Also, UPitt patients tend to have an older epigenetic age than UBC patients. We can plot this difference in a violin plot below.
+
+Chronological vs Methylation Age - Simpler plot
+```{r}
+combo$dz_groupx <- fct_relevel(combo$dz_groupx, c("Control", "fILD", "Airways Disease"))
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo %>% ggplot(aes(x=age_sample, y=mAge, color=dz_groupx))+
+   geom_point(size=0.75)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+   
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+
+```{r}
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo %>% ggplot(aes(x=age_sample, y=mAge, color=dz_groupx))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+   
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+
+
+Epigenetic Age Acceleration
+```{r}
+(dnam %>% ggplot(aes(x=age_sample, y=Age_Acceleration, color=cohort))+
+   geom_point()+
+   labs(x="Chronological Age (Years)", y="Age Acceleration")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+
+Chronological Age vs EAD
+```{r}
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo %>% ggplot(aes(x=age_sample, y=grim_agediff, color=dz_groupx))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Epigenetic Age Difference (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+ 
+    theme_light())
+```
+
+Epigenetic age by fILD diagnosis group
+```{r}
+(dnam %>% ggplot(aes(x=age_sample, y=mAge, color=dx_group))+
+   geom_point()+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+   theme(plot.title = element_text(hjust = 0.5))+    
+   xlim(20,90)+
+   ylim(20,90))
+```
+No clearly discernable difference in epigenetic age between the different diagnosis groups.
+
+Epigenetic age difference between sexes
+```{r}
+(dnam %>% ggplot(aes(x=sex, y=grim_agediff, fill=sex))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   labs(x="Sex", y="Epigenetic Age Difference")+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+Males have a greater epigenetic age difference compared with females.
+
+
+Epigenetic age difference between races
+```{r}
+(dnam %>% ggplot(aes(x=race, y=grim_agediff, fill=race))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   labs(x="Race", y="Epigenetic Age Difference")+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+Black patients appear to have the greates epigenetic age difference.
+
+```{r}
+dnam <- dnam %>% mutate(dx_groupx = ifelse(dx_group=="IPF", "IPF",
+                                           ifelse(dx_group=="CTD-ILD", "CTD-ILD",
+                                           ifelse(dx_group=="HP", "HP",
+                                                  ifelse(dx_group=="OTHER_IIP", "OTHER_ILD",
+                                                         ifelse(dx_group=="OTHER_ILD", "OTHER_ILD", "OTHER_ILD"))))))
+dnam$dx_groupx <- fct_relevel(dnam$dx_groupx, c("IPF"))
+```
+
+Epigenetic age difference between dx_groups
+```{r}
+colors <- c("lightblue1", "deepskyblue", "skyblue3", "dodgerblue3")
+
+
+(dnam %>% ggplot(aes(x=dx_groupx, y=grim_agediff, fill=dx_groupx))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   labs(x="Cohort", y="Epigenetic Age Difference")+
+    scale_fill_manual(values=colors)+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+Epigenetic age difference is high in all diagnostic groups, but most pronounced in CTD-ILD
+
+
+Epigenetic age difference between dx_groups including CanCOLD
+```{r}
+colors <- c("lightblue1", "deepskyblue", "skyblue3", "dodgerblue3", "chartreuse4","darkorange1")
+
+
+(combo %>% ggplot(aes(x=dx_groupx, y=grim_agediff, fill=dx_groupx))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   labs(x="Cohort", y="Epigenetic Age Difference")+
+    scale_fill_manual(values=colors)+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+
+Epigenetic age difference between dx_groups faceted by sex
+```{r}
+(dnam %>% ggplot(aes(x=dx_group, y=grim_agediff, fill=dx_group))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   facet_grid(~sex)+
+   labs(x="Cohort", y="Epigenetic Age Difference")+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+Greater epigenetic age difference in males in all diagnostic groups
+
+Epigenetic age difference between cohorts by dx_group
+```{r}
+(dnam %>% ggplot(aes(x=cohort, y=grim_agediff, fill=cohort))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   facet_grid(~dx_group)+
+   labs(x="Cohort", y="Epigenetic Age Difference")+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+All major dx_groups demonstrate a higher epigenetic age difference in UPitt compared with UBC
+
+
+## Epigenetic Age Difference by Cohort
+```{r}
+(dnam %>% ggplot(aes(x=cohort, y=grim_agediff, fill=cohort))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   labs(x="Cohort", y="Epigenetic Age Difference by Cohort")+
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+UPitt has a much larger epigenetic age difference than UBC.
+
+```{r}
+dnam %>%
+  group_by(cohort, sex) %>%
+  summarize(
+    mean_EAD = mean(grim_agediff, na.rm = TRUE),
+    median_EAD = median(grim_agediff, na.rm = TRUE),
+    Q1_EAD = quantile(grim_agediff, 0.25, na.rm = TRUE),
+    Q3_EAD = quantile(grim_agediff, 0.75, na.rm = TRUE)
+  )
+```
+
+
+Epigenetic age difference by cohort, faceted by sex
+```{r}
+(dnam %>% ggplot(aes(x=cohort, y=grim_agediff, fill=cohort))+
+   geom_boxplot(width=0.2, color="black", alpha=1.0)+
+   geom_violin(width=1.0, alpha=0.5)+
+   facet_grid(~sex)+
+   labs(x="Cohort", y="Epigenetic Age Difference")+
+   theme_light()+
+   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)))
+```
+Bigger epigenetic age difference between the cohorts in males compared with females
+
+
+## Plotting GrimAge - Males Only
+Chronological vs Methylation Age
+```{r}
+colors <- c("skyblue", "steelblue3", "chartreuse4", "goldenrod2", "darkorange1", "coral3")
+
+(combo_m %>% ggplot(aes(x=age_sample, y=mAge, color=dz_group))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+ 
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+So we can see from this plot that our fILD patients almost invariably have a higher epigenetic age than their chronological age.
+Also, UPitt patients tend to have an older epigenetic age than UBC patients. We can plot this difference in a violin plot below.
+
+Chronological vs Methylation Age - Simpler plot
+```{r}
+combo_m$dz_groupx <- fct_relevel(combo_m$dz_groupx, c("Control", "fILD", "Airways Disease"))
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo_m %>% ggplot(aes(x=age_sample, y=mAge, color=dz_groupx))+
+   geom_point(size=0.75)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+   
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+
+```{r}
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo_m %>% ggplot(aes(x=age_sample, y=mAge, color=dz_groupx))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+   
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+
+## Plotting GrimAge - Females Only
+Chronological vs Methylation Age
+```{r}
+colors <- c("skyblue", "steelblue3", "chartreuse4", "goldenrod2", "darkorange1", "coral3")
+
+(combo_f %>% ggplot(aes(x=age_sample, y=mAge, color=dz_group))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+ 
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+So we can see from this plot that our fILD patients almost invariably have a higher epigenetic age than their chronological age.
+Also, UPitt patients tend to have an older epigenetic age than UBC patients. We can plot this difference in a violin plot below.
+
+Chronological vs Methylation Age - Simpler plot
+```{r}
+combo_f$dz_groupx <- fct_relevel(combo_f$dz_groupx, c("Control", "fILD", "Airways Disease"))
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo_f %>% ggplot(aes(x=age_sample, y=mAge, color=dz_groupx))+
+   geom_point(size=0.75)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+   
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+
+```{r}
+colors <- c("chartreuse4", "steelblue3", "darkorange1")
+
+(combo_f %>% ggplot(aes(x=age_sample, y=mAge, color=dz_groupx))+
+   geom_point(shape=1, size=1)+
+   labs(x="Chronological Age (Years)", y="Methylation Age (Years)")+
+   geom_smooth(method="lm", se = FALSE) +
+   geom_abline(intercept = 0, slope = 1, linetype="dashed")+
+    scale_color_manual(values = colors)+
+   theme(plot.title = element_text(hjust = 0.5))+   
+    theme_light()+
+   xlim(20,90)+
+   ylim(20,90))
+```
+
+
+# Summary Data
+
+## Sex Breakdown
+```{r}
+n_prop_tbl(UPitt_dnam$sex)
+n_prop_tbl(UBC_dnam$sex)
+n_prop_tbl(dnam$sex)
+```
+
+## Race Breakdown
+```{r}
+n_prop_tbl(UPitt_dnam$race)
+n_prop_tbl(UBC_dnam$race)
+n_prop_tbl(dnam$race)
+```
+
+```{r}
+n_prop_tbl(UPitt_dnam$dich_Race)
+n_prop_tbl(UBC_dnam$dich_Race)
+n_prop_tbl(dnam$dich_Race)
+```
+
+## Smoking History Breakdown
+```{r}
+n_prop_tbl(UPitt_dnam$smokeHx)
+n_prop_tbl(UBC_dnam$smokeHx)
+n_prop_tbl(dnam$smokeHx)
+```
+
+## Dx_Group Breakdown
+```{r}
+n_prop_tbl(UPitt_dnam$dx_group)
+n_prop_tbl(UBC_dnam$dx_group)
+n_prop_tbl(dnam$dx_group)
+```
+
+## Status Breakdown
+```{r}
+n_prop_tbl(UPitt_dnam$status)
+n_prop_tbl(UBC_dnam$status)
+n_prop_tbl(dnam$status)
+```
+
+## age_sample Breakdown
+```{r}
+summary(UPitt_dnam$age_sample)
+shapiro.test(UPitt_dnam$age_sample)
+summary(UBC_dnam$age_sample)
+shapiro.test(UBC_dnam$age_sample)
+summary(dnam$age_sample)
+sd(dnam$age_sample)
+shapiro.test(dnam$age_sample)
+```
+
+## Baseline FVC Breakdown
+```{r}
+summary(UPitt_dnam$fvc_pct)
+shapiro.test(UPitt_dnam$fvc_pct)
+summary(UBC_dnam$fvc_pct)
+shapiro.test(UBC_dnam$fvc_pct)
+summary(dnam$fvc_pct)
+shapiro.test(dnam$fvc_pct)
+```
+
+## Baseline DLCO Breakdown
+```{r}
+summary(UPitt_dnam$dlco_pct)
+shapiro.test(UPitt_dnam$dlco_pct)
+summary(UBC_dnam$dlco_pct)
+shapiro.test(UBC_dnam$dlco_pct)
+summary(dnam$dlco_pct)
+shapiro.test(dnam$dlco_pct)
+```
+
+## ECDF Disadvantage Score Breakdown
+```{r}
+summary(UPitt_dnam$disadv)
+shapiro.test(UPitt_dnam$disadv)
+summary(UBC_dnam$disadv)
+shapiro.test(UBC_dnam$disadv)
+summary(dnam$disadv)
+shapiro.test(dnam$disadv)
+```
+
+## Time to Censoring Breakdown
+```{r}
+summary(UPitt_dnam$time_DeathTxCensor)
+shapiro.test(UPitt_dnam$time_DeathTxCensor)
+summary(UBC_dnam$time_DeathTxCensor)
+shapiro.test(UBC_dnam$time_DeathTxCensor)
+summary(dnam$time_DeathTxCensor)
+shapiro.test(dnam$time_DeathTxCensor)
+```
+
+## Epigenetic Age Difference Breakdown
+```{r}
+summary(UPitt_dnam$grim_agediff)
+shapiro.test(UPitt_dnam$grim_agediff)
+summary(UBC_dnam$grim_agediff)
+shapiro.test(UBC_dnam$grim_agediff)
+summary(dnam$grim_agediff)
+shapiro.test(dnam$grim_agediff)
+```
+
+By sex
+```{r}
+summary(UPitt_m$grim_agediff)
+summary(UPitt_f$grim_agediff)
+
+summary(UBC_m$grim_agediff)
+summary(UBC_f$grim_agediff)
+
+summary(dnam_m$grim_agediff)
+summary(dnam_f$grim_agediff)
+```
+
+
+# Visual EDA for Pollution-Epigenetic Age Difference Association
+## PM2.5
+Epigenetic age difference by PM2.5 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=PM_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="PM2.5 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Pretty strong upwards correlation between increasing PM2.5 and increasing methylation age difference
+
+Epigenetic age difference by PM2.5 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=PM_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="PM2.5 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Pretty strong upwards correlation between increasing PM2.5 and increasing methylation age difference in IPF, fHP, Unclassifiable ILD, and to a lesser extent CTD-ILD
+
+
+## SO4
+Epigenetic age difference by SO4 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=SO4_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="SO4 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Pretty strong upwards correlation between increasing SO4 and increasing methylation age difference in UPitt
+
+Epigenetic age difference by SO4 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=SO4_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="SO4 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Pretty strong upwards correlation between increasing SO4 and increasing methylation age difference in IPF, fHP, Unclassifiable ILD, and to a lesser extent CTD-ILD
+
+
+## NO3
+Epigenetic age difference by NO3 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=NO3_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="NO3 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Pretty strong upwards correlation between increasing NO3 and increasing methylation age difference in UPitt and to lesser extent UBC-PF
+
+Epigenetic age difference by NO3 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=NO3_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="NO3 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Strong upward trend for all dx_groups
+
+## NH4
+Epigenetic age difference by NH4 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=NH4_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="NH4 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Pretty strong upwards correlation between increasing NH4 and increasing methylation age difference
+
+Epigenetic age difference by NH4 exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=NH4_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="NH4 in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Strong upward trend for most dx groups
+
+## BC
+Epigenetic age difference by BC exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=BC_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="BC in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Fairly strong upwards correlation between increasing BC and increasing methylation age difference
+
+Epigenetic age difference by BC exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=BC_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="BC in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Upward trend for most dx_groups
+
+## OM
+Epigenetic age difference by OM exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=OM_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="OM in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Slight upwards correlation between increasing OM and increasing methylation age difference
+
+Epigenetic age difference by OM exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=OM_5yrPreSamp, colour=dx_group))+ 
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="OM in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Upward trend for most dx_groups except Unclassifiable
+
+## SS
+Epigenetic age difference by SS exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=SS_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="SS in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+No clear trend, even downwards in UBC
+
+Epigenetic age difference by SS exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=SS_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="SS in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Fairly clear downward trend for all dx_groups
+
+## Soil
+Epigenetic age difference by Soil exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=Soil_5yrPreSamp, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Soil in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Slight upwards correlation between increasing Soil and increasing methylation age difference
+
+Epigenetic age difference by Soil exposure in 5yrs pre-sampling
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=Soil_5yrPreSamp, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Soil in 5yrs Pre-Sampling" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Slight upward trend for all dx_groups
+
+# Visual EDA Disadvantage-Epigenetic Age Association
+## UPitt
+Epigenetic age difference by Disadvantage Score in UPitt
+```{r}
+UPitt_dnam <- dnam %>% filter(cohort=="UPitt")
+(UPitt_dnam %>% ggplot(aes(x=grim_agediff, y=disadv))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Disadvantage Score")+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Appears to be increasing association between epigenetic age and ADI in the UPitt cohort
+
+Epigenetic age difference by disadv score
+```{r}
+(UPitt_dnam %>% ggplot(aes(x=grim_agediff, y=disadv, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Disadvantage Score" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+Upward trend for all dx_groups, except fHP
+
+## UBC
+Epigenetic age difference by Disadvantage Score in UBC
+```{r}
+UBC_dnam <- dnam %>% filter(cohort=="UBC")
+(UBC_dnam %>% ggplot(aes(x=grim_agediff, y=disadv))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Disadvantage Score")+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+No clear association between epigenetic age and CIMD in the UBC cohort
+
+Epigenetic age difference by disadv score
+```{r}
+(UBC_dnam %>% ggplot(aes(x=grim_agediff, y=disadv, colour=dx_group))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Disadvantage Score" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+No clear association between epigenetic age and CIMD in the UBC cohort
+
+
+## Combined Cohorts
+```{r}
+(dnam %>% ggplot(aes(x=grim_agediff, y=disadv, colour=cohort))+
+   geom_point()+
+   labs(x="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)", y="Disadvantage Score" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+
+# Visual EDA of EAD Assoc with Baseline FVC
+## Combined Cohorts
+```{r}
+(dnam %>% ggplot(aes(x=fvc_pct, y=grim_agediff, colour=cohort))+
+   geom_point()+
+   labs(x="Baseline FVC % Pred", y="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+
+# Visual EDA of EAD Assoc with Baseline DLCO
+## Combined Cohorts
+```{r}
+(dnam %>% ggplot(aes(x=dlco_pct, y=grim_agediff, colour=cohort))+
+   geom_point()+
+   labs(x="Baseline DLCO % Pred", y="Epigenetic Age Difference \n(Methylation Age - Chronological Age, Years)" )+
+   geom_smooth(method="lm", se = FALSE) +
+   theme(plot.title = element_text(hjust = 0.5)))
+```
+
+# Age at Enrollment by Epigenetic Age Difference
+## UPitt
+### Continuous EAD
+```{r}
+age_model1 <- lm(age_dx ~ grim_agediff, data=UPitt_dnam)
+summary(age_model1)
+confint(age_model1)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.45yrs early age_dx.**
+
+```{r}
+age_model2 <- lm(age_dx ~ grim_agediff + sex + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(age_model2)
+confint(age_model2)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.66yrs early age_dx.**
+
+Model additionally adjusting for diff_dx_enroll
+```{r}
+age_model3 <- lm(age_dx ~ grim_agediff + sex + smokeHx + dich_Race + disadv + dx_IPF + diff_dx_enroll, data=UPitt_dnam)
+summary(age_model3)
+confint(age_model3)
+```
+
+## UBC
+### Continuous EAD
+```{r}
+age_model1 <- lm(age_dx ~ grim_agediff, data=UBC_dnam)
+summary(age_model1)
+confint(age_model1)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.15yrs early age_dx.**
+
+```{r}
+age_model2 <- lm(age_dx ~ grim_agediff + sex + smokeHx + dich_Race + disadv + dx_IPF, data=UBC_dnam)
+summary(age_model2)
+confint(age_model2)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.30yrs early age_dx.**
+
+Model additionally adjusting for diff_dx_enroll
+```{r}
+age_model3 <- lm(age_dx ~ grim_agediff + sex + smokeHx + dich_Race + disadv + dx_IPF + diff_dx_enroll, data=UBC_dnam)
+summary(age_model3)
+confint(age_model3)
+```
+
+## Combined Cohorts
+### Continuous EAD
+```{r}
+age_model1 <- lm(age_dx ~ grim_agediff + cluster(cohort), data=dnam)
+summary(age_model1)
+confint(age_model1)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.35yrs early age_dx.**
+
+```{r}
+age_model2 <- lm(age_dx ~ grim_agediff + sex + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), data=dnam)
+summary(age_model2)
+confint(age_model2)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.54yrs earlier age_dx.**
+
+
+Model additionally adjusting for diff_dx_enroll
+```{r}
+age_model3 <- lm(age_dx ~ grim_agediff + sex + smokeHx + dich_Race + disadv + dx_IPF + diff_dx_enroll + cluster(cohort), data=dnam)
+summary(age_model3)
+confint(age_model3)
+```
+**Significant assoc between epigenetic age difference and earlier age at diagnosis - i.e. each 1 year increase in EAD associated with 1.67yrs earlier age_dx.**
+
+
+
+# Survival by Epigenetic Age Difference
+## UPitt
+### Continuous EAD
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample, data=UPitt_dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher grim_agediff is significantly assoc with increased mortality. Interpret this as for each 1 year increase in epigenetic age difference, there is an 14% increased risk of mortality.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF, data=UPitt_dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**Adjusting for other covariates, there is a strong association between grim_agediff and mortality, indicating that for each 1 year increase in epigenetic age difference, there is an 13% increased risk of mortality!**
+
+Adjusted Model + Lung Function
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct, data=UPitt_dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**Adjusting for other covariates + lung function, there remains a strong association between grim_agediff and mortality, indicating that for each 1 year increase in epigenetic age difference, there is an 11% increased risk of mortality!**
+
+
+## UBC
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample, data=UBC_dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher grim_agediff is significantly assoc with increased mortality. Interpret this as for each 1 year increase in epigenetic age difference, there is a 40% increased risk of mortality.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF, data=UBC_dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**Adjusting for other covariates, there is a strong association between grim_agediff and mortality, indicating that for each 1 year increase in epigenetic age difference, there is a 38% increased risk of mortality!**
+
+
+Adjusted Model + Lung Function
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct, data=UBC_dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**Adjusting for other covariates + lung function, there is a strong association between grim_agediff and mortality, indicating that for each 1 year increase in epigenetic age difference, there is a 32% increased risk of mortality**
+
+## Combined Cohorts
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher grim_agediff is significantly assoc with increased mortality. Interpret this as for each 1 year increase in epigenetic age difference, there is a 19% increased risk of mortality.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**Adjusting for other covariates, there is a strong association between grim_agediff and mortality, indicating that for each 1 year increase in epigenetic age difference, there is a 17% increased risk of mortality!**
+
+
+
+Adjusted Model + Lung Function
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct, data=dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**Adjusting for other covariates + baseline lung function, there remains a strong association between grim_agediff and mortality, indicating that for each 1 year increase in epigenetic age difference, there is an 13% increased risk of mortality!**
+
+## Variable HR Spline Models
+Base model
+```{r}
+#First need to make dataframe that only includes patients with a value for event
+dnamx <- dnam %>% filter(!is.na(grim_agediff) & !is.na(deadORtx) & !is.na(time_DeathTxCensor) & !is.na(cohort))
+
+#Then make survival function
+surv1 <- Surv(dnamx$time_DeathTxCensor, dnamx$deadORtx==1)
+fit1 <- coxph(surv1 ~ pspline(dnamx$grim_agediff, df=3) + cluster(dnamx$cohort))
+predicted <- predict(fit1, type="terms", se.fit=T, terms=1)
+```
+
+```{r}
+#Then plot
+plot(dnamx$grim_agediff, exp(predicted$fit), type="n", xlim=c(0,20), ylim=c(0,2))
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit)), col = "red" , lty = 1 )
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit + 1.96 * predicted$se)), col = "orange" , lty = 2 )
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit - 1.96 * predicted$se)), col = "orange" , lty = 2 )
+```
+
+Coviariate adjusted model
+```{r}
+#First need to make dataframe that only includes patients with a value for event
+dnamx <- dnam %>% filter(!is.na(grim_agediff) & !is.na(deadORtx) & !is.na(time_DeathTxCensor) & !is.na(cohort) & !is.na(age_sample) & !is.na(sex) & !is.na(smokeHx) & !is.na(dich_Race) & !is.na(dx_IPF))
+
+#Then make survival function
+surv1 <- Surv(dnamx$time_DeathTxCensor, dnamx$deadORtx==1)
+fit1 <- coxph(surv1 ~ pspline(dnamx$grim_agediff, df=3) + dnamx$age_sample + dnamx$sex + dnamx$smokeHx + dnamx$dich_Race + dnamx$dx_IPF + cluster(dnamx$cohort))
+predicted <- predict(fit1, type="terms", se.fit=T, terms=1)
+```
+
+```{r}
+#Then plot
+plot(dnamx$grim_agediff, exp(predicted$fit), type="n", xlim=c(0,20), ylim=c(0,4))
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit)), col = "red" , lty = 1 )
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit + 1.96 * predicted$se)), col = "orange" , lty = 2 )
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit - 1.96 * predicted$se)), col = "orange" , lty = 2 )
+```
+
+
+Coviariate + lung funciton adjusted model
+```{r}
+#First need to make dataframe that only includes patients with a value for event
+dnamx <- dnam %>% filter(!is.na(grim_agediff) & !is.na(deadORtx) & !is.na(time_DeathTxCensor) & !is.na(cohort) & !is.na(age_sample) & !is.na(sex) & !is.na(smokeHx) & !is.na(dich_Race) & !is.na(dx_IPF) &!is.na(fvc_pct) & !is.na(dlco_pct))
+
+#Then make survival function
+surv1 <- Surv(dnamx$time_DeathTxCensor, dnamx$deadORtx==1)
+fit1 <- coxph(surv1 ~ pspline(dnamx$grim_agediff, df=3) + dnamx$age_sample + dnamx$sex + dnamx$smokeHx + dnamx$dich_Race + dnamx$dx_IPF + dnamx$fvc_pct + dnamx$dlco_pct + cluster(dnamx$cohort))
+predicted <- predict(fit1, type="terms", se.fit=T, terms=1)
+```
+
+```{r}
+#Then plot
+plot(dnamx$grim_agediff, exp(predicted$fit), type="n", xlim=c(0,25), ylim=c(0,4))
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit)), col = "red" , lty = 1 )
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit + 1.96 * predicted$se)), col = "orange" , lty = 2 )
+lines(sm.spline(dnamx$grim_agediff, exp(predicted$fit - 1.96 * predicted$se)), col = "orange" , lty = 2 )
+```
+
+### Dichotomized EAD
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff_dich + age_sample + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher grim_agediff is significantly assoc with increased mortality. Interpret this as compared to the Low EAD group, the High EAD group has a 3.03x increased risk of mortality when you account for baseline age.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff_dich + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**When we account for age_sample, higher grim_agediff is significantly assoc with increased mortality. Interpret this as compared to the Low EAD group, the High EAD group has a 2.33x increased risk of mortality when you account for baseline age.**
+
+Adjusted + Baseline Lung Function Model
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff_dich + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**When we account for other covariates + baseline lung function, higher grim_agediff is significantly assoc with increased mortality. Interpret this as compared to the Low EAD group, the High EAD group has a 1.89x increased risk of mortality.**
+
+
+
+Now I will make a Kaplan-Meier survival curve, discretized by dichotomized EAD:
+```{r, fig.height=5, fig.width=7}
+surv1 <- survfit(Surv(time_DeathTxCensor, deadORtx==1) ~grim_agediff_dich, data=dnam)
+(ggsurvplot(surv1, 
+            censor=TRUE,
+            pval=TRUE,
+            xlim=c(0,10),
+            legend="right",
+           data=dnam,
+           legend.title="Low vs High EAD",
+           legend.labs=c("Low", "High"),
+           risk.table=F,
+           title="Time to Death or Transplant by EAD Quartile",
+           xlab="Time from Diagnosis (years)",
+           ylab="Survival Probability (Death or Lung Transplant)",
+           ggtheme = theme_grey()
+           ))
+```
+
+### Quartiled EAD
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff_quart + age_sample + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher grim_agediff Q2-4 are significantly assoc with increased mortality. Interpret this as compared to the lowest EAD group Q1, the highest EAD group Q4 has a 7.07x increased risk of mortality when you account for baseline age.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff_quart + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**When we account for covariates, higher grim_agediff Q2-4 are significantly assoc with increased mortality. Interpret this as compared to the lowest EAD group Q1, the highest EAD group Q4 has a 5.90x increased risk of mortality.**
+
+
+Adjusted + Baseline Lung Function Model
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ grim_agediff_quart + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**When we account for covariates + baseline lung function, higher grim_agediff Q2-4 are significantly assoc with increased mortality. Interpret this as compared to the lowest EAD group Q1, the highest EAD group Q4 has a 3.62x increased risk of mortality when you account for baseline age.**
+
+
+Now I will make a Kaplan-Meier survival curve, discretized by EAD quartiles:
+```{r, fig.height=5, fig.width=7}
+surv1 <- survfit(Surv(time_DeathTxCensor, deadORtx==1) ~grim_agediff_quart, data=dnam)
+(ggsurvplot(surv1, 
+            palette="YlOrRd",
+            censor=TRUE,
+            pval=TRUE,
+            xlim=c(0,10),
+            legend="right",
+           data=dnam,
+           legend.title="EAD Quartile",
+           legend.labs=c("Q1", "Q2", "Q3", "Q4"),
+           risk.table=F,
+           title="Time to Death or Transplant by EAD Quartile",
+           xlab="Time from Diagnosis (years)",
+           ylab="Survival Probability (Death or Lung Transplant)",
+           ggtheme = theme_grey()
+           ))
+```
+
+
+# Pollutant IQR Associations with Epigenetic Age Diff
+## PM2.5 IQR in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+PM_model1 <- lm(grim_agediff ~ PM_5yrSamp_IQR, data=UPitt_dnam)
+summary(PM_model1)
+confint(PM_model1)
+```
+**Significant assoc between higher PM2.5 exposure and higher epigenetic age difference. I.e. each 1 IQR increase 5yr PM2.5 assoc with 2.78 years increased epigenetic age diff.**
+
+
+```{r}
+PM_model2 <- lm(grim_agediff ~ PM_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(PM_model2)
+confint(PM_model2)
+```
+**Sig assoc between higher PM2.5 exposure and higher epigenetic age difference. I.e. each 1 IQR increase 5yr PM2.5 assoc with 2.84 years increased epigenetic age diff.**
+
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+PM_model3 <- lm(grim_agediff ~ PM_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(PM_model3)
+confint(PM_model3)
+```
+**Sig assoc between higher PM2.5 exposure and higher epigenetic age difference. I.e. each 1 IQR increase 5yr PM2.5 assoc with 2.46 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+PM_model1 <- lm(grim_agediff ~ PM_5yrSamp_IQR, data=UBC_dnam)
+summary(PM_model1)
+confint(PM_model1)
+```
+No significant assoc between higher PM2.5 exposure and epigenetic age difference in UBC cohort.
+
+
+```{r}
+PM_model2 <- lm(grim_agediff ~ PM_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(PM_model2)
+confint(PM_model2)
+```
+No significant assoc between higher PM2.5 exposure in 5yrs pre-sampling and epigenetic age difference in UBC cohort.
+
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+PM_model3 <- lm(grim_agediff ~ PM_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(PM_model3)
+confint(PM_model3)
+```
+No significant assoc between higher PM2.5 exposure in 5yrs pre-sampling and epigenetic age difference in UBC cohort.
+
+### Combined Cohorts
+```{r}
+PM_model1 <- lm(grim_agediff ~ PM_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(PM_model1)
+confint(PM_model1)
+```
+**Significant assoc between highere PM2.5 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr PM2.5 assoc with 2.80 years increased epigenetic age diff.**
+
+
+```{r}
+PM_model2 <- lm(grim_agediff ~ PM_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(PM_model2)
+confint(PM_model2)
+```
+**Sig assoc between higher PM2.5 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr PM2.5 assoc with 2.88 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+PM_model3 <- lm(grim_agediff ~ PM_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(PM_model3)
+confint(PM_model3)
+```
+**Sig assoc between higher PM2.5 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr PM2.5 assoc with 2.95 years increased epigenetic age diff.**
+
+
+## SO4 in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+SO4_model1 <- lm(grim_agediff ~ SO4_5yrSamp_IQR, data=UPitt_dnam)
+summary(SO4_model1)
+confint(SO4_model1)
+```
+**Sig assoc between higher SO4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr SO4 assoc with 2.98 years increased epigenetic age diff.**
+
+
+```{r}
+SO4_model2 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(SO4_model2)
+confint(SO4_model2)
+```
+**Sig assoc between higher SO4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr SO4 assoc with 2.92 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+SO4_model3 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(SO4_model3)
+confint(SO4_model3)
+```
+**Sig assoc between higher SO4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr SO4 assoc with 2.54 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+SO4_model1 <- lm(grim_agediff ~ SO4_5yrSamp_IQR, data=UBC_dnam)
+summary(SO4_model1)
+confint(SO4_model1)
+```
+No significant assoc between higher SO4 exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+
+```{r}
+SO4_model2 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(SO4_model2)
+confint(SO4_model2)
+```
+No significant assoc between higher SO4 exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+SO4_model3 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(SO4_model3)
+confint(SO4_model3)
+```
+
+### Combined Cohorts
+```{r}
+SO4_model1 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(SO4_model1)
+confint(SO4_model1)
+```
+**Sig assoc between higher SO4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr SO4 assoc with 3.03 years increased epigenetic age diff.**
+
+
+```{r}
+SO4_model2 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(SO4_model2)
+confint(SO4_model2)
+```
+**Sig assoc between higher SO4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr SO4 assoc with 3.02 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+SO4_model3 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(SO4_model3)
+confint(SO4_model3)
+```
+**Sig assoc between higher SO4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr SO4 assoc with 3.02 years increased epigenetic age diff.**
+
+## NO3 in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+NO3_model1 <- lm(grim_agediff ~ NO3_5yrSamp_IQR, data=UPitt_dnam)
+summary(NO3_model1)
+confint(NO3_model1)
+```
+**Significant assoc between higher NO3 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NO3 assoc with 1.77 years increased epigenetic age diff.**
+
+
+```{r}
+NO3_model2 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(NO3_model2)
+confint(NO3_model2)
+```
+**Significant assoc between higher NO3 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NO3 assoc with 1.79 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+NO3_model3 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(NO3_model3)
+confint(NO3_model3)
+```
+**Significant assoc between higher NO3 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NO3 assoc with 1.44 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+NO3_model1 <- lm(grim_agediff ~ NO3_5yrSamp_IQR, data=UBC_dnam)
+summary(NO3_model1)
+confint(NO3_model1)
+```
+No significant assoc between higher NO3 exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+
+```{r}
+NO3_model2 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(NO3_model2)
+confint(NO3_model2)
+```
+No significant assoc between higher NO3 exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+NO3_model3 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(NO3_model3)
+confint(NO3_model3)
+```
+
+### Combined Cohorts
+```{r}
+NO3_model1 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(NO3_model1)
+confint(NO3_model1)
+```
+**Significant assoc between higher NO3 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NO3 assoc with 1.86 years increased epigenetic age diff.**
+
+
+```{r}
+NO3_model2 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(NO3_model2)
+confint(NO3_model2)
+```
+**Significant assoc between higher NO3 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NO3 assoc with 1.89 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+NO3_model3 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(NO3_model3)
+confint(NO3_model3)
+```
+**Significant assoc between higher NO3 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NO3 assoc with 2.34 years increased epigenetic age diff.**
+
+
+## NH4 in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+NH4_model1 <- lm(grim_agediff ~ NH4_5yrSamp_IQR, data=UPitt_dnam)
+summary(NH4_model1)
+confint(NH4_model1)
+```
+**Significant assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 3.52 years increased epigenetic age diff.**
+
+
+```{r}
+NH4_model2 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(NH4_model2)
+confint(NH4_model2)
+```
+**Significant assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 3.49 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+NH4_model3 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(NH4_model3)
+confint(NH4_model3)
+```
+**Significant assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 3.07 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+NH4_model1 <- lm(grim_agediff ~ NH4_5yrSamp_IQR, data=UBC_dnam)
+summary(NH4_model1)
+confint(NH4_model1)
+```
+**Sig assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 27.72 years increased epigenetic age diff.**
+
+
+```{r}
+NH4_model2 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(NH4_model2)
+confint(NH4_model2)
+```
+**Sig assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 28.22 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+NH4_model3 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(NH4_model3)
+confint(NH4_model3)
+```
+**Sig assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 25.76 years increased epigenetic age diff.**
+
+
+### Combined Cohorts
+```{r}
+NH4_model1 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(NH4_model1)
+confint(NH4_model1)
+```
+**Significant assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 3.65 years increased epigenetic age diff.**
+
+
+```{r}
+NH4_model2 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(NH4_model2)
+confint(NH4_model2)
+```
+**Significant assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 3.68 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+NH4_model3 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(NH4_model3)
+confint(NH4_model3)
+```
+**Significant assoc between higher NH4 exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr NH4 assoc with 3.50 years increased epigenetic age diff.**
+
+
+## BC in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+BC_model1 <- lm(grim_agediff ~ BC_5yrSamp_IQR, data=UPitt_dnam)
+summary(BC_model1)
+confint(BC_model1)
+```
+**Significant assoc between higher BC exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr BC assoc with 2.56 years increased epigenetic age diff.**
+
+
+```{r}
+BC_model2 <- lm(grim_agediff ~ BC_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(BC_model2)
+confint(BC_model2)
+```
+**Significant assoc between higher BC exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr BC assoc with 2.58 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+BC_model3 <- lm(grim_agediff ~ BC_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(BC_model3)
+confint(BC_model3)
+```
+**Significant assoc between higher BC exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr BC assoc with 2.27 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+BC_model1 <- lm(grim_agediff ~ BC_5yrSamp_IQR, data=UBC_dnam)
+summary(BC_model1)
+confint(BC_model1)
+```
+No significant assoc between higher BC exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+
+```{r}
+BC_model2 <- lm(grim_agediff ~ BC_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(BC_model2)
+confint(BC_model2)
+```
+No significant assoc between higher BC exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+BC_model3 <- lm(grim_agediff ~ BC_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(BC_model3)
+confint(BC_model3)
+```
+
+### Combined Cohorts
+```{r}
+BC_model1 <- lm(grim_agediff ~ BC_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(BC_model1)
+confint(BC_model1)
+```
+**Significant assoc between higher BC exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr BC assoc with 1.77 years increased epigenetic age diff.**
+
+
+```{r}
+BC_model2 <- lm(grim_agediff ~ BC_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(BC_model2)
+confint(BC_model2)
+```
+**Significant assoc between higher BC exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr BC assoc with 1.72 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+BC_model3 <- lm(grim_agediff ~ BC_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(BC_model3)
+confint(BC_model3)
+```
+**Significant assoc between higher BC exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr BC assoc with 2.31 years increased epigenetic age diff.**
+
+## OM in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+OM_model1 <- lm(grim_agediff ~ OM_5yrSamp_IQR, data=UPitt_dnam)
+summary(OM_model1)
+confint(OM_model1)
+```
+**Significant assoc between higher OM exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr OM assoc with 1.92 years increased epigenetic age diff.**
+
+
+```{r}
+OM_model2 <- lm(grim_agediff ~ OM_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(OM_model2)
+confint(OM_model2)
+```
+**Significant assoc between higher OM exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr OM assoc with 1.84 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+OM_model3 <- lm(grim_agediff ~ OM_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(OM_model3)
+confint(OM_model3)
+```
+**Significant assoc between higher OM exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr OM assoc with 1.51 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+OM_model1 <- lm(grim_agediff ~ OM_5yrSamp_IQR, data=UBC_dnam)
+summary(OM_model1)
+confint(OM_model1)
+```
+No significant assoc between higher OM exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+
+```{r}
+OM_model2 <- lm(grim_agediff ~ OM_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(OM_model2)
+confint(OM_model2)
+```
+No significant assoc between higher OM exposure in 5yrs pre-sampling and epigenetic age difference in UBC-PF cohort.
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+OM_model3 <- lm(grim_agediff ~ OM_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(OM_model3)
+confint(OM_model3)
+```
+
+### Combined Cohorts
+```{r}
+OM_model1 <- lm(grim_agediff ~ OM_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(OM_model1)
+confint(OM_model1)
+```
+**Significant assoc between higher OM exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr OM assoc with 0.79 years increased epigenetic age diff.**
+
+
+```{r}
+OM_model2 <- lm(grim_agediff ~ OM_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(OM_model2)
+confint(OM_model2)
+```
+**Sig assoc between higher OM exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr OM assoc with 0.75 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+OM_model3 <- lm(grim_agediff ~ OM_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(OM_model3)
+confint(OM_model3)
+```
+**Sig assoc between higher OM exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr OM assoc with 1.15 years increased epigenetic age diff.**
+
+## SS in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+SS_model1 <- lm(grim_agediff ~ SS_5yrSamp_IQR, data=UPitt_dnam)
+summary(SS_model1)
+confint(SS_model1)
+```
+No significant assoc between higher SS exposure in 5yrs pre-sampling and epigenetic age difference.
+
+
+```{r}
+SS_model2 <- lm(grim_agediff ~ SS_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(SS_model2)
+confint(SS_model2)
+```
+No significant assoc between higher SS exposure in 5yrs pre-sampling and epigenetic age difference.
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+SS_model3 <- lm(grim_agediff ~ SS_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(SS_model3)
+confint(SS_model3)
+```
+
+### UBC Alone
+```{r}
+SS_model1 <- lm(grim_agediff ~ SS_5yrSamp_IQR, data=UBC_dnam)
+summary(SS_model1)
+confint(SS_model1)
+```
+**Sig assoc between higher SS exposure in 5yrs pre-sampling and 1.22 years lower epigenetic age difference in UBC-PF cohort.**
+
+
+```{r}
+SS_model2 <- lm(grim_agediff ~ SS_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(SS_model2)
+confint(SS_model2)
+```
+**Sig assoc between higher SS exposure in 5yrs pre-sampling and 1.24 years lower epigenetic age difference in UBC-PF cohort.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+SS_model3 <- lm(grim_agediff ~ SS_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(SS_model3)
+confint(SS_model3)
+```
+**Sig assoc between higher SS exposure in 5yrs pre-sampling and 1.15 years lower epigenetic age difference in UBC-PF cohort.**
+
+### Combined Cohorts
+```{r}
+SS_model1 <- lm(grim_agediff ~ SS_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(SS_model1)
+confint(SS_model1)
+```
+No significant assoc between higher SS exposure in 5yrs pre-sampling and  epigenetic age difference.
+
+
+```{r}
+SS_model2 <- lm(grim_agediff ~ SS_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(SS_model2)
+confint(SS_model2)
+```
+No significant assoc between higher SS exposure in 5yrs pre-sampling and  epigenetic age difference.
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+SS_model3 <- lm(grim_agediff ~ SS_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(SS_model3)
+confint(SS_model3)
+```
+**When additionally adjusting for smoking, there is now a significant association with a 1IQR increase in SS associated with 1.01 years younger EAD.**
+
+## Soil in 5yrs Pre-Sampling
+### UPitt Alone
+```{r}
+Soil_model1 <- lm(grim_agediff ~ Soil_5yrSamp_IQR, data=UPitt_dnam)
+summary(Soil_model1)
+confint(Soil_model1)
+```
+**Sig assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 1.57 years increased epigenetic age diff.**
+
+
+```{r}
+Soil_model2 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + dich_Race + disadv, data=UPitt_dnam)
+summary(Soil_model2)
+confint(Soil_model2)
+```
+**Sig assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 1.60 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+Soil_model3 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+summary(Soil_model3)
+confint(Soil_model3)
+```
+**Sig assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 1.38 years increased epigenetic age diff.**
+
+### UBC Alone
+```{r}
+Soil_model1 <- lm(grim_agediff ~ Soil_5yrSamp_IQR, data=UBC_dnam)
+summary(Soil_model1)
+confint(Soil_model1)
+```
+**Sig assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 2.78 years increased epigenetic age diff.**
+
+
+```{r}
+Soil_model2 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + dich_Race + disadv, data=UBC_dnam)
+summary(Soil_model2)
+confint(Soil_model2)
+```
+**Sig assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 2.85 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+Soil_model3 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=UBC_dnam)
+summary(Soil_model3)
+confint(Soil_model3)
+```
+*Marginal assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 2.56 years increased epigenetic age diff.*
+
+### Combined Cohorts
+```{r}
+Soil_model1 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + cluster(cohort), data=dnam)
+summary(Soil_model1)
+confint(Soil_model1)
+```
+**Significant assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 1.81 years increased epigenetic age diff.**
+
+
+```{r}
+Soil_model2 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + dich_Race + disadv + cluster(cohort), data=dnam)
+summary(Soil_model2)
+confint(Soil_model2)
+```
+**Significant assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 1.86 years increased epigenetic age diff.**
+
+Sensitivity Analysis including SmokeHx in Pollution -> EAD Models
+```{r}
+Soil_model3 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + dich_Race + disadv + smokeHx, data=dnam)
+summary(Soil_model3)
+confint(Soil_model3)
+```
+**Significant assoc between higher Soil exposure in 5yrs pre-sampling and higher epigenetic age difference. I.e. each 1 IQR increase 5yr Soil assoc with 2.42 years increased epigenetic age diff.**
+
+## Forest Plots for Pollutant Assoc with EAD
+### PM2.5, SO4, NO3, NH4, BC, OM, SS, Soil
+```{r}
+EAD <- structure(list(mean=c(NA, 2.88, 3.02, 1.89, 3.68, 1.72, 0.74, -0.38, 1.86),
+                      lower=c(NA, 1.39, 1.27, 0.72, 1.89, 0.60, 0.19, -0.98, 0.64),
+                      upper=c(NA, 4.38, 4.78, 3.06, 5.48, 2.84, 1.30, 0.22, 3.08)),
+                 .Names=c("mean","lower","upper"),
+                 row.names=c(NA, -11L),
+                 class="data.frame")
+
+tabletext <- cbind(c("  Pollutant", "PM2.5", "SO4", "NO3", "NH4", "BC", "OM", "SS", "Soil"),
+                   c("Beta (95% CI)", "2.88 (1.39 to 4.38)", "3.02 (1.27 to 4.78)", "1.89 (0.72 to 3.06)", "3.68 (1.89 to 5.48)", "1.72 (0.60 to 2.84)", "0.74 (0.19 to 1.30)", "-0.38 (-0.98 to 0.22)", "1.86 (0.64 to 3.08)"),
+                   c("P-value", "<0.001", "<0.001", "0.002", "<0.001", "0.003", "0.008", "0.22", "0.003"))
+
+
+EAD %>% forestplot(labeltext = tabletext, 
+             is.summary = c(TRUE, rep(FALSE, 8)),
+             clip = c(-4, 15), 
+             col = fpColors(box = "royalblue",
+                            line = "darkblue",
+                           summary = "royalblue"),
+             boxsize = 0.3,
+             vp.width = 0.5, # Adjust the width to tilt the boxes
+             vp.height = 0.5)
+```
+
+## Multiconstituent Models for assoc of PM2.5 constituents with EAD
+### UPitt
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp, data=UPitt_dnam)
+
+#Next construct the base linear model
+qc.fit1 <- qgcomp.noboot(grim_agediff~.,data=UPitt_dnam[,c(Xnm, 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+#view the results
+qc.fit1
+```
+**Increased PM2.5 mixture significantly assoc with increased epigenetic age difference. I.e. each 1 quartile increase PM2.5 mixture assoc with 1.02 year increased EAD with NH4 > Soil > SS > BC having the most harmful effects.**
+
+Complete multi-pollutant model
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp  + dich_Race + disadv, data=UPitt_dnam)
+
+
+qc.fit2 <- qgcomp.noboot(grim_agediff~.,data=UPitt_dnam[,c(Xnm, 'dich_Race',  'disadv', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+qc.fit2
+```
+**Increased PM2.5 mixture significantly assoc with increased epigenetic age difference. I.e. each 1 quartile increase PM2.5 mixture assoc with 1.14 year increased EAD with NH4 > BC > SS > Soil > NO3 having the most harmful effects.**
+
+Sensitivity analysis including smoking history
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp  + dich_Race + disadv + smokeHx, data=UPitt_dnam)
+
+
+qc.fit2 <- qgcomp.noboot(grim_agediff~.,data=UPitt_dnam[,c(Xnm, 'dich_Race',  'disadv', 'smokeHx', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+qc.fit2
+```
+**Increased PM2.5 mixture significantly assoc with increased epigenetic age difference. I.e. each 1 quartile increase PM2.5 mixture assoc with 0.92 year increased EAD with NH4 > BC > Soil > SS having the most harmful effects.**
+
+### UBC
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp, data=UBC_dnam)
+
+#Next construct the base linear model
+qc.fit1 <- qgcomp.noboot(grim_agediff~.,data=UBC_dnam[,c(Xnm, 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+#view the results
+qc.fit1
+```
+No sig assoc between PM2.5 mixture significantly assoc and epigenetic age difference in UBC cohort.
+
+Complete multi-pollutant model
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp + dich_Race + disadv, data=UBC_dnam)
+
+
+qc.fit2 <- qgcomp.noboot(grim_agediff~.,data=UBC_dnam[,c(Xnm, 'dich_Race',  'disadv', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+qc.fit2
+```
+No sig assoc between PM2.5 mixture significantly assoc and epigenetic age difference in UBC cohort.
+
+Sensitivity analysis including smoking history
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp  + dich_Race + disadv + smokeHx, data=UBC_dnam)
+
+
+qc.fit2 <- qgcomp.noboot(grim_agediff~.,data=UBC_dnam[,c(Xnm, 'dich_Race',  'disadv', 'smokeHx', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+qc.fit2
+```
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp + cluster(cohort), data=dnam)
+
+#Next construct the base linear model
+qc.fit1 <- qgcomp.noboot(grim_agediff~.,data=dnam[,c(Xnm, 'cohort', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+#view the results
+qc.fit1
+```
+**Increased PM2.5 mixture significantly assoc with increased epigenetic age difference. I.e. each 1 quartile increase PM2.5 mixture assoc with 1.22 year increased EAD with NH4 > OM > Soil > NO3 having the most harmful effects.**
+
+Coviariate Adjusted multi-pollutant model
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp + dich_Race + disadv + cluster(cohort), data=dnam)
+
+
+qc.fit2 <- qgcomp.noboot(grim_agediff~.,data=dnam[,c(Xnm, 'dich_Race',  'disadv', 'cohort', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+qc.fit2
+```
+**Increased PM2.5 mixture significantly assoc with increased epigenetic age difference. I.e. each 1 quartile increase PM2.5 mixture assoc with 1.34 year increased EAD with NH4 > OM > Soil > NO3 having the most harmful effects.**
+
+Sensitivity analysis including smoking history
+```{r}
+#First need to list the pollutants in the model
+Xnm <- c('SO4_5yrPreSamp','NO3_5yrPreSamp','NH4_5yrPreSamp','BC_5yrPreSamp','OM_5yrPreSamp','SS_5yrPreSamp','Soil_5yrPreSamp')
+
+lm(grim_agediff ~ SO4_5yrPreSamp + NH4_5yrPreSamp + NO3_5yrPreSamp + BC_5yrPreSamp + OM_5yrPreSamp + SS_5yrPreSamp + Soil_5yrPreSamp  + dich_Race + disadv + smokeHx, data=dnam)
+
+
+qc.fit2 <- qgcomp.noboot(grim_agediff~.,data=dnam[,c(Xnm, 'dich_Race',  'disadv', 'smokeHx', 'grim_agediff')], expnms=Xnm, family=gaussian(), q=4)
+
+qc.fit2
+```
+**Increased PM2.5 mixture significantly assoc with increased epigenetic age difference. I.e. each 1 quartile increase PM2.5 mixture assoc with 1.18 year increased EAD with NH4 > OM > Soil  having the most harmful effects.**
+
+
+
+# Disadvantage IQR Association with Epigenetic Age Difference
+## UPitt Alone - ADI score association
+```{r}
+disadv_IQR_model1 <- lm(grim_agediff ~ disadv_IQR, data=UPitt_dnam)
+summary(disadv_IQR_model1)
+confint(disadv_IQR_model1)
+```
+**Sig assoc between higher disadv_IQRantage score and higher epigenetic age difference. I.e. each IQR increase in ADI assoc with 1.26 years increased epigenetic age diff.**
+
+
+```{r}
+disadv_IQR_model2 <- lm(grim_agediff ~ disadv_IQR + dich_Race, data=UPitt_dnam)
+summary(disadv_IQR_model2)
+confint(disadv_IQR_model2)
+```
+**Sig assoc between higher disadv_IQRantage score and higher epigenetic age difference. I.e. each IQR increase in ADI assoc with 1.16 years increased epigenetic age diff.**
+
+Sensitivity analysis additionally adjusting for smokeHx in disadv -> EAD models
+```{r}
+disadv_IQR_model3 <- lm(grim_agediff ~ disadv_IQR + dich_Race + smokeHx, data=UPitt_dnam)
+summary(disadv_IQR_model3)
+confint(disadv_IQR_model3)
+```
+**Sig assoc between higher disadv_IQR score and higher epigenetic age difference. I.e. each IQR increase in ADI assoc with 1.09 years increased epigenetic age diff.**
+
+
+### UBC Alone
+```{r}
+disadv_IQR_model1 <- lm(grim_agediff ~ disadv_IQR, data=UBC_dnam)
+summary(disadv_IQR_model1)
+confint(disadv_IQR_model1)
+```
+No significant assoc between higher CIMD and epigenetic age difference in UBC-PF cohort.
+
+
+```{r}
+disadv_IQR_model2 <- lm(grim_agediff ~ disadv_IQR + dich_Race, data=UBC_dnam)
+summary(disadv_IQR_model2)
+confint(disadv_IQR_model2)
+```
+No significant assoc between higher CIMD and epigenetic age difference in UBC-PF cohort.
+
+Sensitivity analysis additionally adjusting for smokeHx in disadv -> EAD models
+```{r}
+disadv_IQR_model3 <- lm(grim_agediff ~ disadv_IQR + dich_Race + smokeHx, data=UBC_dnam)
+summary(disadv_IQR_model3)
+confint(disadv_IQR_model3)
+```
+No significant assoc between higher CIMD and epigenetic age difference in UBC-PF cohort.
+
+### Combined Cohorts
+```{r}
+disadv_IQR_model1 <- lm(grim_agediff ~ disadv_IQR + cluster(cohort), data=dnam)
+summary(disadv_IQR_model1)
+confint(disadv_IQR_model1)
+```
+*Marginal assoc between higher disadv_IQRantage score and higher epigenetic age difference. I.e. each IQR increase in normalized disadvantage score assoc with 0.73 years increased epigenetic age diff.*
+
+
+```{r}
+disadv_IQR_model2 <- lm(grim_agediff ~ disadv_IQR + dich_Race + cluster(cohort), data=dnam)
+summary(disadv_IQR_model2)
+confint(disadv_IQR_model2)
+```
+*Marginal assoc between higher disadv_IQRantage score and higher epigenetic age difference. I.e. each IQR increase in normalized disadvantage score assoc with 0.68 years increased epigenetic age diff.*
+
+Sensitivity analysis additionally adjusting for smokeHx in disadv -> EAD models
+```{r}
+disadv_IQR_model3 <- lm(grim_agediff ~ disadv_IQR + dich_Race + smokeHx, data=dnam)
+summary(disadv_IQR_model3)
+confint(disadv_IQR_model3)
+```
+*Marginal assoc between higher disadv_IQRantage score and higher epigenetic age difference. I.e. each IQR increase in normalized disadvantage score assoc with 0.75 years increased epigenetic age diff.*
+
+
+# IQR Pollutant Associations with Mortality & Mediation by grim_agediff
+## PM2.5 IQR in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+**PM2.5 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["PM_5yrSamp_IQR"])/(coxPH_model1a$coefficients["PM_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 3% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+**PM2.5 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the PM_5yrSamp_IQR HR, suggesting that a portion of the effect of PM2.5 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["PM_5yrSamp_IQR"])/(coxPH_model2a$coefficients["PM_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~35% of the association of PM2.5 with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - PM2.5 UPitt
+```{r}
+cgmed_model1 <- lm(grim_agediff ~ PM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="PM_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~34% of the PM2.5 assoc with mortality is mediated through grim_agediff, and this effect is significant.**
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+PM2.5 in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["PM_5yrSamp_IQR"])/(coxPH_model1a$coefficients["PM_5yrSamp_IQR"])))
+med_prop
+```
+
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+PM2.5 in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["PM_5yrSamp_IQR"])/(coxPH_model2a$coefficients["PM_5yrSamp_IQR"])))
+med_prop
+```
+Neither analyses are significant in the CARE-PF models, so can't rely much on this mediation proportion.
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**PM2.5 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["PM_5yrSamp_IQR"])/(coxPH_model1a$coefficients["PM_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 12% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**PM2.5 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the PM_5yrSamp_IQR HR, suggesting that aa portion of the effect of PM2.5 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["PM_5yrSamp_IQR"])/(coxPH_model2a$coefficients["PM_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~48% of the association of PM2.5 with mortality may be mediated by grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - PM2.5 Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ PM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ PM_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="PM_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~40% of the PM2.5 assoc with mortality is mediated through grim_agediff, and this effect is significant.**
+
+
+
+## SO4 in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+**SO4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["SO4_5yrSamp_IQR"])/(coxPH_model1a$coefficients["SO4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 2% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+**SO4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the SO4_5yrSamp_IQR HR, suggesting that a portion of the effect of SO4 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["SO4_5yrSamp_IQR"])/(coxPH_model2a$coefficients["SO4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~30% of the association of SO4 with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - SO4 UPitt
+```{r}
+cgmed_model1 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="SO4_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~28% of the SO4 assoc with mortality is mediated through grim_agediff.**
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+SO4 in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["SO4_5yrSamp_IQR"])/(coxPH_model1a$coefficients["SO4_5yrSamp_IQR"])))
+med_prop
+```
+Can't interpret
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+SO4 in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["SO4_5yrSamp_IQR"])/(coxPH_model2a$coefficients["SO4_5yrSamp_IQR"])))
+med_prop
+```
+Neither analyses are significant in the CARE-PF models, so can't rely much on this mediation proportion.
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**SO4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["SO4_5yrSamp_IQR"])/(coxPH_model1a$coefficients["SO4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 11% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**SO4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the SO4_5yrSamp_IQR HR, suggesting that aa portion of the effect of SO4 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["SO4_5yrSamp_IQR"])/(coxPH_model2a$coefficients["SO4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~45% of the association of SO4 with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - SO4 Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ SO4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ SO4_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="SO4_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+This indicates that 36% of the SO4 assoc with mortality is mediated through grim_agediff, but this effect is not significant.
+
+
+
+
+
+## NO3 in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+NO3 in 5yrs pre-sampling not associated with mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+NO3 in 5yrs pre-sampling not associated with mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["NO3_5yrSamp_IQR"])/(coxPH_model1a$coefficients["NO3_5yrSamp_IQR"])))
+med_prop
+```
+Can't rely on mediation proportion as neither preceding analyses significant.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+NO3 in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["NO3_5yrSamp_IQR"])/(coxPH_model2a$coefficients["NO3_5yrSamp_IQR"])))
+med_prop
+```
+Can't rely on this number as not significant analyses
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+NO3 in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["NO3_5yrSamp_IQR"])/(coxPH_model1a$coefficients["NO3_5yrSamp_IQR"])))
+med_prop
+```
+Can't rely on this mediation proportion as neither preceding analysis significant.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+NO3 in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["NO3_5yrSamp_IQR"])/(coxPH_model2a$coefficients["NO3_5yrSamp_IQR"])))
+med_prop
+```
+Can't rely on this mediation proportion as neither preceding analysis significant.
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**NO3 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["NO3_5yrSamp_IQR"])/(coxPH_model1a$coefficients["NO3_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 22% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**NO3 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the NO3_5yrSamp_IQR HR, suggesting that aa portion of the effect of NO3 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["NO3_5yrSamp_IQR"])/(coxPH_model2a$coefficients["NO3_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~64% of the association of NO3 with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - NO3 Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ NO3_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ NO3_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="NO3_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+*This indicates that ~51% of the NO3 assoc with mortality is mediated through grim_agediff, and this effect is marginal.*
+
+
+
+
+
+
+## NH4 in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+**NH4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["NH4_5yrSamp_IQR"])/(coxPH_model1a$coefficients["NH4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 4% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+**NH4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the NH4_5yrSamp_IQR HR, suggesting that aa portion of the effect of NH4 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["NH4_5yrSamp_IQR"])/(coxPH_model2a$coefficients["NH4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~33% of the association of NH4 with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - NH4 UPitt
+```{r}
+cgmed_model1 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="NH4_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~33% of the NH4 assoc with mortality is mediated through grim_agediff, and the effect is significant.**
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+**NH4 in 5yrs pre-sampling associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["NH4_5yrSamp_IQR"])/(coxPH_model1a$coefficients["NH4_5yrSamp_IQR"])))
+med_prop
+```
+28% mediation in unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+NH4 in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["NH4_5yrSamp_IQR"])/(coxPH_model2a$coefficients["NH4_5yrSamp_IQR"])))
+med_prop
+```
+
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**NH4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["NH4_5yrSamp_IQR"])/(coxPH_model1a$coefficients["NH4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 12% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**NH4 in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the NH4_5yrSamp_IQR HR, suggesting that aa portion of the effect of NH4 in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["NH4_5yrSamp_IQR"])/(coxPH_model2a$coefficients["NH4_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~47% of the association of NH4 with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - NH4 Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ NH4_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ NH4_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="NH4_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~41% of the NH4 assoc with mortality is mediated through grim_agediff, and this effect is significant.**
+
+
+
+
+
+
+## BC in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["BC_5yrSamp_IQR"])/(coxPH_model1a$coefficients["BC_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is no mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["BC_5yrSamp_IQR"])/(coxPH_model2a$coefficients["BC_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding analysis significant, so can't rely on this proportion
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["BC_5yrSamp_IQR"])/(coxPH_model1a$coefficients["BC_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding analysis significant so can't rely on this proportion.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+BC in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+BC in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["BC_5yrSamp_IQR"])/(coxPH_model2a$coefficients["BC_5yrSamp_IQR"])))
+med_prop
+```
+Neither analyses are significant in the UBC models, so can't rely much on this mediation proportion.
+
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**BC in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["BC_5yrSamp_IQR"])/(coxPH_model1a$coefficients["BC_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 23% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**BC in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the BC_5yrSamp_IQR HR, suggesting that aa portion of the effect of BC in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["BC_5yrSamp_IQR"])/(coxPH_model2a$coefficients["BC_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~83% of the association of BC with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - BC Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ BC_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ BC_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="BC_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+*This indicates that ~76% of the BC assoc with mortality is mediated through grim_agediff, and this effect is marginal.*
+
+
+
+
+
+## OM in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+OM in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+OM in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["OM_5yrSamp_IQR"])/(coxPH_model1a$coefficients["OM_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding model significant so can't rely on this proportion.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+OM in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+OM in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["OM_5yrSamp_IQR"])/(coxPH_model2a$coefficients["OM_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding analysis significant so can't rely on this proportion
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+OM in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["OM_5yrSamp_IQR"])/(coxPH_model1a$coefficients["OM_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding analysis significant so can't rely on mediation proportion.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+OM in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+OM in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["OM_5yrSamp_IQR"])/(coxPH_model2a$coefficients["OM_5yrSamp_IQR"])))
+med_prop
+```
+Neither analyses are significant in the CARE-PF models, so can't rely much on this mediation proportion.
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**OM in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+Including grim_agediff decreases the OM_5yrSamp_IQR HR
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["OM_5yrSamp_IQR"])/(coxPH_model1a$coefficients["OM_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 48% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**OM in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the OM_5yrSamp_IQR HR, suggesting that aa portion of the effect of OM in 5yrs pre-sampling on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["OM_5yrSamp_IQR"])/(coxPH_model2a$coefficients["OM_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~97% of the association of OM with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - OM Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ OM_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ OM_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="OM_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+*This indicates that 115% of the OM assoc with mortality is mediated through grim_agediff, and this effect is marginal.* The >100% mediation indicates that the effect of EAD on mortality is greater than the effect of OM on mortality, suggesting it is mediating through other pathways outside of OM as well, which is consistent with our findings
+
+
+
+
+
+
+## SS in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+**SS in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+Including grim_agediff decreases the SS_5yrSamp_IQR HR
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["SS_5yrSamp_IQR"])/(coxPH_model1a$coefficients["SS_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is a 1% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+*SS in 5yrs pre-sampling is marginally associated with increased mortality in this model.*
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["SS_5yrSamp_IQR"])/(coxPH_model2a$coefficients["SS_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~17% of the association of SS with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+
+
+### Causal Mediation Analysis - SS UPitt
+```{r}
+cgmed_model1 <- lm(grim_agediff ~ SS_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF, data=UPitt_dnam)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="SS_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+28% mediation but not significant.
+
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+SS in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["SS_5yrSamp_IQR"])/(coxPH_model1a$coefficients["SS_5yrSamp_IQR"])))
+med_prop
+```
+Neither analysis significant so can't rely on the mediation proportion in this analysis.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+SS in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["SS_5yrSamp_IQR"])/(coxPH_model2a$coefficients["SS_5yrSamp_IQR"])))
+med_prop
+```
+Neither analyses are significant in the CARE-PF models, so can't rely much on this mediation proportion.
+
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+SS in 5yrs pre-sampling is not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["SS_5yrSamp_IQR"])/(coxPH_model1a$coefficients["SS_5yrSamp_IQR"])))
+med_prop
+```
+Can't interpret as neither previous models significant.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+SS in 5yrs pre-sampling is not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["SS_5yrSamp_IQR"])/(coxPH_model2a$coefficients["SS_5yrSamp_IQR"])))
+med_prop
+```
+Not interpretable
+ 
+### Causal Mediation Analysis - SS Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ SS_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ SS_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="SS_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+Not interpretable as prior models not significant
+
+
+
+
+## Soil in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+Soil in 5yrs pre-sampling not associated with mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+Soil in 5yrs pre-sampling not associated with mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["Soil_5yrSamp_IQR"])/(coxPH_model1a$coefficients["Soil_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding model significant so can't rely on this mediation proportion.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+Soil in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+Soil in 5yrs pre-sampling not associated with mortality in this model.
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["Soil_5yrSamp_IQR"])/(coxPH_model2a$coefficients["Soil_5yrSamp_IQR"])))
+med_prop
+```
+Not interpretable
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+Soil in 5yrs pre-sampling not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["Soil_5yrSamp_IQR"])/(coxPH_model1a$coefficients["Soil_5yrSamp_IQR"])))
+med_prop
+```
+Neither preceding analysis significant, so can't rely on this mediation proportion.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+Soil in 5yrs pre-sampling not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + sex + dich_Race + disadv + age_sample + dx_IPF + smokeHx+ grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["Soil_5yrSamp_IQR"])/(coxPH_model2a$coefficients["Soil_5yrSamp_IQR"])))
+med_prop
+```
+Neither analyses are significant in the CARE-PF models, so can't rely much on this mediation proportion.
+
+
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+**Soil in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["Soil_5yrSamp_IQR"])/(coxPH_model1a$coefficients["Soil_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that there is 16% mediation in the unadjusted model.
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**Soil in 5yrs pre-sampling is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the Soil_5yrSamp_IQR HR, suggesting that aa portion of the effect of Soil on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["Soil_5yrSamp_IQR"])/(coxPH_model2a$coefficients["Soil_5yrSamp_IQR"])))
+med_prop
+```
+This indicates that ~60% of the association of Soil with mortality may be mediated by beta value at grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - Soil Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ Soil_5yrSamp_IQR + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ Soil_5yrSamp_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + disadv + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="Soil_5yrSamp_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~50% of the Soil assoc with mortality is mediated through grim_agediff, and this effect is significant.**
+
+
+# Disadvantage IQR Associations with Mortality & Mediation by grim_agediff
+## Disadvantage IQR in 5yrs Pre-Sampling
+### UPitt
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR, data=UPitt_dnam, id=ID)
+summary(coxPH_model1a)
+```
+Disadvantage is not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["disadv_IQR"])/(coxPH_model1a$coefficients["disadv_IQR"])))
+med_prop
+```
+Uninterpretable
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + sex + age_sample + smokeHx + dich_Race + dx_IPF, data=UPitt_dnam, id=ID)
+summary(coxPH_model2a)
+```
+Disadvantage is not associated with increased mortality in this model (although it nears significance with previously reported HR similar to our prior reports in larger cohorts).
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + sex + age_sample + smokeHx + dich_Race + dx_IPF + grim_agediff, data=UPitt_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["disadv_IQR"])/(coxPH_model2a$coefficients["disadv_IQR"])))
+med_prop
+```
+Uninterpretable
+
+### Causal Mediation Analysis - Disadvantage UPitt
+```{r}
+cgmed_model1 <- lm(grim_agediff ~ disadv_IQR + sex + age_sample + smokeHx + dich_Race + dx_IPF, data=UPitt_dnam)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + dx_IPF, data=UPitt_dnam)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="disadv_IQR", mediator="grim_agediff")
+summary(med1)
+```
+This indicates that ~40% of the Disadvantage assoc with mortality is mediated through grim_agediff, but this effect is not significant.
+
+### CARE
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR, data=UBC_dnam, id=ID)
+summary(coxPH_model1a)
+```
+Disadvantage not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["disadv_IQR"])/(coxPH_model1a$coefficients["disadv_IQR"])))
+med_prop
+```
+
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + sex + dich_Race + age_sample + dx_IPF + smokeHx, data=UBC_dnam, id=ID)
+summary(coxPH_model2a)
+```
+Disadvantage not associated with mortality in this model.
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + sex + dich_Race + age_sample + dx_IPF + smokeHx + grim_agediff, data=UBC_dnam, id=ID)
+summary(coxPH_model2b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["disadv_IQR"])/(coxPH_model2a$coefficients["disadv_IQR"])))
+med_prop
+```
+Neither analyses are significant in the CARE-PF models, so can't rely much on this mediation proportion.
+
+### Combined Cohorts
+Unadjusted model
+```{r}
+coxPH_model1a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + cluster(cohort), dnam, id=ID)
+summary(coxPH_model1a)
+```
+Disadvantage is not associated with increased mortality in this model.
+
+Unadjusted model + grim_agediff
+```{r}
+coxPH_model1b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model1b)
+```
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model1b$coefficients["disadv_IQR"])/(coxPH_model1a$coefficients["disadv_IQR"])))
+med_prop
+```
+Uninterpretable
+
+Adjusted model
+```{r}
+coxPH_model2a <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + sex + age_sample + smokeHx + dich_Race + dx_IPF + cluster(cohort), dnam, id=ID)
+summary(coxPH_model2a)
+```
+**Disadvantage is associated with increased mortality in this model.**
+
+Adjusted model + grim_agediff
+```{r}
+coxPH_model2b <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + sex + age_sample + smokeHx + dich_Race + dx_IPF + cluster(cohort) + grim_agediff, dnam, id=ID)
+summary(coxPH_model2b)
+```
+**Including grim_agediff in this model decreases the disadv_IQR HR, suggesting that a portion of the effect of Disadvantage on mortality is mediated through methylation at grim_agediff.**
+
+Mediation analysis
+```{r}
+med_prop <- (1-((coxPH_model2b$coefficients["disadv_IQR"])/(coxPH_model2a$coefficients["disadv_IQR"])))
+med_prop
+```
+This indicates that ~63% of the association of Disadvantage with mortality may be mediated by grim_agediff in these adjusted models.
+
+### Causal Mediation Analysis - Disadvantage Combined Cohorts
+```{r}
+dnamx <- dnam %>% filter(!is.na(time_DeathTxCensor))
+cgmed_model1 <- lm(grim_agediff ~ disadv_IQR + sex + age_sample + smokeHx + dich_Race + dx_IPF + cluster(cohort), dnamx)
+summary(cgmed_model1)
+confint(cgmed_model1)
+```
+
+```{r}
+med_model1 <- survreg(Surv(time_DeathTxCensor, deadORtx==1) ~ disadv_IQR + grim_agediff + sex + age_sample + smokeHx + dich_Race + dx_IPF + cluster(cohort), dnamx)
+summary(med_model1)
+```
+
+
+```{r}
+set.seed(100)
+med1 <- mediation::mediate(cgmed_model1, med_model1, treat="disadv_IQR", mediator="grim_agediff")
+summary(med1)
+```
+**This indicates that ~59% of the Disadvantage assoc with mortality is mediated through grim_agediff, and this effect is significant.**
+
+
+# Forest Plots for EAD Mediation of Pollutant-Mortality Relationship
+## Combined Cohorts All Pollutants
+```{r}
+EAD <- structure(list(mean=c(NA, NA, 2.01, 1.43, NA, 2.37, 1.61, NA, 1.45, 1.15, NA, 2.24, 1.53, NA, 1.36, 1.05, NA, 1.16, 1.005, NA, 1.62, 1.21, NA, 1.21, 1.07),
+                      lower=c(NA, NA, 1.94, 1.25, NA, 2.31, 1.33, NA, 1.15, 1.10, NA, 2.09, 1.32, NA, 1.11, 1.00, NA, 1.13, 1.004, NA, 1.38, 1.20, NA, 1.20, 0.99),
+                      upper=c(NA, NA, 2.09, 1.64, NA, 2.42, 1.96, NA, 1.84, 1.19, NA, 2.40, 1.77, NA, 1.66, 1.12, NA, 1.19, 1.006, NA, 1.91, 1.23, NA, 1.23, 1.16)),
+                 .Names=c("mean","lower","upper"),
+                 row.names=c(NA, -11L),
+                 class="data.frame")
+
+tabletext <- cbind(c("  Pollutant", "PM2.5", "Without EAD", "With EAD", "SO4", "Without EAD", "With EAD", "NO3", "Without EAD", "With EAD", "NH4", "Without EAD", "With EAD", "BC", "Without EAD", "With EAD", "OM", "Without EAD", "With EAD", "Soil", "Without EAD", "With EAD", "Disadvantage", "Without EAD", "With EAD"),
+                   c("HR (95% CI)", "", "2.01 (1.94-2.09)", "1.43 (1.25-1.64)", "", "2.37 (2.31-2.42)", "1.61 (1.33-1.96)", "", "1.45 (1.15-1.84)", "1.15 (1.10-1.19)", "", "2.24 (2.09-2.40)", "1.53 (1.32-1.77)", "", "1.36 (1.11-1.66)", "1.05 (1.00-1.12)", "", "1.16 (1.13-1.19)", "1.005 (1.004-1.006)", "", "1.62 (1.38-1.91)", "1.21 (1.20-1.23)", "", "1.21 (1.20-1.23)", "1.07 (0.99-1.16)"),
+                   c("P-value", "", "<0.001", "<0.001", "", "<0.001", "<0.001", "", "0.001", "<0.001", "", "<0.001", "<0.001", "", "0.003", "0.07", "", "<0.001", "<0.001", "", "<0.001", "<0.001", "", "<0.001", "0.08"))
+
+styles <- fpShapesGp(
+  lines=list(gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue")),
+  box=list(gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"), gpar(col="royalblue"), gpar(col="royalblue"), gpar(col="lightblue"))
+)
+
+EAD %>% forestplot(labeltext = tabletext, 
+             is.summary = c(rep(TRUE, 2), rep(FALSE, 2), TRUE, rep(FALSE, 2), TRUE, rep(FALSE, 2), TRUE, rep(FALSE, 2), TRUE, rep(FALSE, 2), TRUE, rep(FALSE, 2), TRUE, rep(FALSE, 2), TRUE, rep(FALSE, 2)),
+             clip = c(0, 3), 
+             col = fpColors(box = c("royalblue", "lightblue"),
+                            line = "darkblue",
+                           summary = "royalblue"),
+             boxsize=0.5,
+             zero=1,
+             shapes_gp=styles)
+
+```
+
+# Bar Plots of Mediation Effects
+```{r}
+med <- data.frame(pollutant=c("PM2.5", "PM2.5", "SO4", "SO4", "NO3", "NO3", "NH4", "NH4", "BC", "BC", "OM", "OM", "Soil", "Soil", "Disadvantage", "Disadvantage"), med_type=c("TM","CM", "TM","CM", "TM","CM", "TM","CM", "TM","CM", "TM","CM", "TM","CM", "TM","CM"), PercentMediation=c(48, 40, 45, 36, 64, 51, 47, 41, 83, 76, 97, 115, 60, 50, 63, 59), min=c(48, 17, 45, 12, 64, -1, 47, 16, 83, -3, 97, -4, 60, 25, 63, 23), max=c(48, 76, 45, 74, 64, 68, 47, 75, 83, 92, 97, 234, 60, 72, 63, 116))
+med$med_type <- factor(med$med_type, levels = c("CM", "TM"))
+
+pollutant_levels <- c("Disadvantage", "Soil", "OM", "BC", "NH4", "NO3", "SO4", "PM2.5")
+med$pollutant <- factor(med$pollutant, levels = pollutant_levels)
+
+(ggplot(med, aes(x = pollutant, y = PercentMediation, ymin = min, ymax = max, fill = med_type)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0.25) +
+  ggtitle("Mediation Proportions") +
+  ylim(0, 120) +
+  coord_flip()+
+  theme_bw())
+```
+
+# Bar Plots of Mediation Effects - No traditional mediation effect
+```{r}
+med <- data.frame(pollutant=c("PM2.5", "SO4", "NO3", "NH4", "BC", "OM", "Soil", "Disadvantage"), med_type=c("CM", "CM", "CM", "CM", "CM", "CM", "CM", "CM"), PercentMediation=c(40, 36, 51, 41, 76, 115, 50, 59), min=c(17, 12, -1, 16, -3, -4, 25, 23), max=c(76, 74, 68, 75, 92, 234, 72, 116))
+med$med_type <- factor(med$med_type, levels = c("CM"))
+
+pollutant_levels <- c("Disadvantage", "Soil", "OM", "BC", "NH4", "NO3", "SO4", "PM2.5")
+med$pollutant <- factor(med$pollutant, levels = pollutant_levels)
+
+(ggplot(med, aes(x = pollutant, y = PercentMediation, ymin = min, ymax = max, fill = med_type)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0.25) +
+  ggtitle("Mediation Proportions") +
+  ylim(0, 120) +
+  coord_flip()+
+  theme_bw())
+```
+
+
+
+# Survival Sensitivity Analysis using GrimAge Acceleration (residuals)
+## UPitt
+### Continuous EAD
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample, data=UPitt_dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher Age_Acceleration is significantly assoc with increased mortality. Interpret this as for each 1 point increase in GrimAgeAccel, there is an 11% increased risk of mortality.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF, data=UPitt_dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**Adjusting for other covariates, there is a strong association between Age_Acceleration and mortality, indicating that for each 1 point increase in GrimAgeAccel, there is a 8% increased risk of mortality!**
+
+Adjusted Model + Lung Function
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct, data=UPitt_dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+Adjusting for other covariates + lung function, there is no association between Age_Acceleration and mortality
+
+
+## UBC
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample, data=UBC_dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher Age_Acceleration is significantly assoc with increased mortality. Interpret this as for each 1 point increase in GrimAgeAccel, there is a 34% increased risk of mortality.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF, data=UBC_dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**Adjusting for other covariates, there is a strong association between Age_Acceleration and mortality, indicating that for each 1 point increase in GrimAgeAccel, there is a 28% increased risk of mortality!**
+
+
+Adjusted Model + Lung Function
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct, data=UBC_dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**Adjusting for other covariates + lung function, there is a strong association between Age_Acceleration and mortality, indicating that for each 1 point increase in GrimAgeAccel, there is a 26% increased risk of mortality**
+
+## Combined Cohorts
+Unadjusted Model
+```{r}
+coxPH_model1 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model1)
+```
+**When we account for age_sample, higher Age_Acceleration is significantly assoc with increased mortality. Interpret this as for each 1 point increase in GrimAgeAccel, there is a 14% increased risk of mortality.**
+
+Adjusted Model
+```{r}
+coxPH_model2 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + cluster(cohort), data=dnam, id=EPIC_ID)
+summary(coxPH_model2)
+```
+**Adjusting for other covariates, there is a strong association between Age_Acceleration and mortality, indicating that for each 1 point increase in GrimAgeAccel, there is a 11% increased risk of mortality!**
+
+
+
+Adjusted Model + Lung Function
+```{r}
+coxPH_model3 <- coxph(Surv(time_DeathTxCensor, deadORtx==1) ~ Age_Acceleration + age_sample + sex + dich_Race + disadv + smokeHx + dx_IPF + fvc_pct + dlco_pct, data=dnam, id=EPIC_ID)
+summary(coxPH_model3)
+```
+**Adjusting for other covariates, there is a strong association between Age_Acceleration and mortality, indicating that for each 1 point increase in GrimAgeAccel, there is a 7% increased risk of mortality!**
+
+## Variable HR Spline Models
+Base model
+```{r}
+#First need to make dataframe that only includes patients with a value for event
+dnamx <- dnam %>% filter(!is.na(Age_Acceleration) & !is.na(deadORtx) & !is.na(time_DeathTxCensor) & !is.na(cohort))
+
+#Then make survival function
+surv1 <- Surv(dnamx$time_DeathTxCensor, dnamx$deadORtx==1)
+fit1 <- coxph(surv1 ~ pspline(dnamx$Age_Acceleration, df=3) + cluster(dnamx$cohort))
+predicted <- predict(fit1, type="terms", se.fit=T, terms=1)
+```
+
+```{r}
+#Then plot
+plot(dnamx$Age_Acceleration, exp(predicted$fit), type="n")
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit)), col = "red" , lty = 1 )
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit + 1.96 * predicted$se)), col = "orange" , lty = 2 )
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit - 1.96 * predicted$se)), col = "orange" , lty = 2 )
+```
+
+Coviariate adjusted model
+```{r}
+#First need to make dataframe that only includes patients with a value for event
+dnamx <- dnam %>% filter(!is.na(Age_Acceleration) & !is.na(deadORtx) & !is.na(time_DeathTxCensor) & !is.na(cohort) & !is.na(age_sample) & !is.na(sex) & !is.na(smokeHx) & !is.na(dich_Race) & !is.na(dx_IPF))
+
+#Then make survival function
+surv1 <- Surv(dnamx$time_DeathTxCensor, dnamx$deadORtx==1)
+fit1 <- coxph(surv1 ~ pspline(dnamx$Age_Acceleration, df=3) + dnamx$age_sample + dnamx$sex + dnamx$smokeHx + dnamx$dich_Race + dnamx$dx_IPF + cluster(dnamx$cohort))
+predicted <- predict(fit1, type="terms", se.fit=T, terms=1)
+```
+
+```{r}
+#Then plot
+plot(dnamx$Age_Acceleration, exp(predicted$fit), type="n")
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit)), col = "red" , lty = 1 )
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit + 1.96 * predicted$se)), col = "orange" , lty = 2 )
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit - 1.96 * predicted$se)), col = "orange" , lty = 2 )
+```
+
+
+Coviariate + lung funciton adjusted model
+```{r}
+#First need to make dataframe that only includes patients with a value for event
+dnamx <- dnam %>% filter(!is.na(Age_Acceleration) & !is.na(deadORtx) & !is.na(time_DeathTxCensor) & !is.na(cohort) & !is.na(age_sample) & !is.na(sex) & !is.na(smokeHx) & !is.na(dich_Race) & !is.na(dx_IPF) &!is.na(fvc_pct) & !is.na(dlco_pct))
+
+#Then make survival function
+surv1 <- Surv(dnamx$time_DeathTxCensor, dnamx$deadORtx==1)
+fit1 <- coxph(surv1 ~ pspline(dnamx$Age_Acceleration, df=3) + dnamx$age_sample + dnamx$sex + dnamx$smokeHx + dnamx$dich_Race + dnamx$dx_IPF + dnamx$fvc_pct + dnamx$dlco_pct + cluster(dnamx$cohort))
+predicted <- predict(fit1, type="terms", se.fit=T, terms=1)
+```
+
+```{r}
+#Then plot
+plot(dnamx$Age_Acceleration, exp(predicted$fit), type="n")
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit)), col = "red" , lty = 1 )
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit + 1.96 * predicted$se)), col = "orange" , lty = 2 )
+lines(sm.spline(dnamx$Age_Acceleration, exp(predicted$fit - 1.96 * predicted$se)), col = "orange" , lty = 2 )
+```
+
+
